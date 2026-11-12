@@ -1,0 +1,99 @@
+{
+  "provider_id": {
+    "type": "string",
+    "description": "抽取用的对话模型 Provider",
+    "hint": "留空 = 不选择，此时不会调用任何模型；请在插件 WebUI 的「设置」页从 AstrBot 已配置的 Provider 中选择。",
+    "default": ""
+  },
+  "json_mode": {
+    "type": "bool",
+    "description": "优先使用 JSON 模式",
+    "hint": "Provider 不支持 response_format 时会自动降级为提示词约束 + 容错解析。",
+    "default": true
+  },
+  "temperature": {
+    "type": "float",
+    "description": "抽取温度",
+    "default": 0.2
+  },
+  "max_tokens": {
+    "type": "int",
+    "description": "单次抽取最大输出 token",
+    "default": 4096
+  },
+  "llm_timeout": {
+    "type": "int",
+    "description": "单次模型调用超时（秒）",
+    "default": 60
+  },
+  "chunk_chars": {
+    "type": "int",
+    "description": "字幕分块字符数",
+    "hint": "按字符切窗并保留时间轴重叠，避免超出小上下文模型的上限。",
+    "default": 6000
+  },
+  "max_chunks": {
+    "type": "int",
+    "description": "单个视频最多抽取的块数",
+    "default": 8
+  },
+  "request_interval": {
+    "type": "float",
+    "description": "B 站请求最小间隔（秒）",
+    "hint": "不建议低于 1 秒，风控是常态。",
+    "default": 1.0
+  },
+  "collection_page_size": {
+    "type": "int",
+    "description": "合集分页大小",
+    "default": 30
+  },
+  "max_collection_items": {
+    "type": "int",
+    "description": "单个合集最多入队视频数",
+    "default": 500
+  },
+  "queue_concurrency": {
+    "type": "int",
+    "description": "后台任务并发数",
+    "hint": "建议保持 1；调高会显著增加触发风控的概率。",
+    "default": 1
+  },
+  "raw_retention_days": {
+    "type": "int",
+    "description": "原始字幕段保留天数",
+    "hint": "超期后清空字幕正文，只保留出处与哈希。",
+    "default": 30
+  },
+  "review_required": {
+    "type": "bool",
+    "description": "新词条先进入审核队列",
+    "default": true
+  },
+  "memewiki_enabled": {
+    "type": "bool",
+    "description": "同步到梗百科（astrbot_plugin_memewiki）",
+    "default": true
+  },
+  "memewiki_min_confidence": {
+    "type": "float",
+    "description": "允许同步的最低置信度",
+    "default": 0.6
+  },
+  "auto_parse_on_link": {
+    "type": "bool",
+    "description": "群里出现 B 站链接时自动入队解析",
+    "hint": "默认关闭，避免刷屏与风控。",
+    "default": false
+  },
+  "inject_enabled": {
+    "type": "bool",
+    "description": "对话时自动注入命中的梗条目",
+    "default": true
+  },
+  "inject_max_chars": {
+    "type": "int",
+    "description": "单次注入的最大字符数",
+    "default": 600
+  }
+}

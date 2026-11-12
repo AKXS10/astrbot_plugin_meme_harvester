@@ -1,0 +1,69 @@
+name: tests
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unittest:
+    name: unittest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Byte-compile
+        run: python -m compileall -q main.py harvester
+
+      - name: Validate plugin metadata
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          json.loads(pathlib.Path("_conf_schema.json").read_text(encoding="utf-8"))
+
+          try:
+              import yaml
+          except ImportError:
+              print("PyYAML not installed, skip metadata.yaml validation")
+              raise SystemExit(0)
+
+          meta = yaml.safe_load(pathlib.Path("metadata.yaml").read_text(encoding="utf-8"))
+          assert meta.get("name") == "astrbot_plugin_meme_harvester", meta
+          assert meta.get("version"), meta
+          print("metadata ok:", meta["name"], meta["version"])
+          PY
+
+      - name: Run unit tests
+        # 没有 AstrBot 运行时，依赖 astrbot 的 api / 插件装配用例会自动 skip
+        run: python -m unittest discover -s tests -t . -v
+
+  package:
+    name: 打包检查
+    runs-on: ubuntu-latest
+    needs: unittest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 断言必要文件存在
+        run: |
+          test -f metadata.yaml
+          test -f _conf_schema.json
+          test -f main.py
+          test -f views/meme_harvester/index.html
+          test -f views/meme_harvester/app.js
+          test -f views/meme_harvester/qrcode.min.js
+          test -f README.md
+          test -f LICENSE
+          if git ls-files | grep -E '__pycache__|\.pyc$|secret\.key|memes\.db'; then
+            echo "仓库中不应提交运行产物" >&2
+            exit 1
+          fi

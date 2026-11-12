@@ -1,0 +1,30 @@
+name: astrbot_plugin_meme_harvester
+display_name: 梗采集器
+short_desc: 从 B 站字幕采集网络梗，自动整理入库并同步梗百科
+desc: |
+  把「最新在用的梗」变成 Bot 能用的知识。
+
+  - 单条 B 站视频：贴链接即可解析 CC / AI 字幕，抽取词条、释义、用法与出处
+  - 合集解析：按合集 / 系列批量入队，限速爬取，断点续跑
+  - 本地词库：SQLite 存储，支持检索、审核、去重与置信度
+  - 梗百科兼容：进程内写入 astrbot_plugin_memewiki 的自定义黑话（只增不改，冲突进审核队列）
+  - WebUI：解析链接、管理词条、维护群黑话、扫码或粘贴 Cookie 登录、查看同步日志
+  - 群黑话：按群隔离，命中优先于公共词库
+version: 0.1.0
+author: meme-harvester
+repo: https://github.com/your-name/astrbot_plugin_meme_harvester
+astrbot_version: ">=4.13,<5"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - qq_official_webhook
+  - telegram
+  - discord
+  - slack
+  - webchat
+tags:
+  - 梗
+  - 黑话
+  - bilibili
+  - 字幕
+  - WebUI

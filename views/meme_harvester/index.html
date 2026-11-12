@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>梗采集器</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <div class="logo">梗</div>
+        <div>
+          <div class="brand-name">梗采集器</div>
+          <div class="brand-sub" id="brand-sub">v0.1.0</div>
+        </div>
+      </div>
+      <nav id="tabs">
+        <button class="tab active" data-tab="overview">概览</button>
+        <button class="tab" data-tab="parse">单条解析</button>
+        <button class="tab" data-tab="collection">合集解析</button>
+        <button class="tab" data-tab="memes">词条库</button>
+        <button class="tab" data-tab="reviews">审核队列 <span class="badge" id="review-badge" hidden>0</span></button>
+        <button class="tab" data-tab="slangs">群黑话</button>
+        <button class="tab" data-tab="settings">设置</button>
+      </nav>
+      <div class="side-foot">
+        <div id="auth-dot" class="dot off"></div>
+        <span id="auth-text">未登录 B 站</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- 概览 -->
+      <section class="panel active" id="panel-overview">
+        <h1>概览</h1>
+        <div class="cards" id="stat-cards"></div>
+        <div class="row-2">
+          <div class="card">
+            <h3>B 站登录</h3>
+            <div id="auth-box">
+              <p class="muted" id="auth-desc">未登录。扫码登录后即可解析需要登录态的字幕（AI 字幕必须登录）。</p>
+              <div class="btn-row">
+                <button class="btn primary" id="btn-qr">扫码登录</button>
+                <button class="btn" id="btn-auth-refresh">检查登录态</button>
+                <button class="btn danger" id="btn-logout">退出登录</button>
+              </div>
+              <div class="qr-wrap" id="qr-wrap" hidden>
+                <div id="qr-box" class="qr-box"></div>
+                <div class="qr-hint" id="qr-hint">请使用 B 站手机客户端扫码</div>
+                <div class="link-line" id="qr-link"></div>
+              </div>
+              <details class="mt">
+                <summary>手动粘贴 Cookie（兜底）</summary>
+                <textarea id="cookie-input" rows="4" placeholder="SESSDATA=xxx; bili_jct=xxx; DedeUserID=xxx; buvid3=xxx"></textarea>
+                <button class="btn mt" id="btn-cookie-save">校验并保存</button>
+              </details>
+            </div>
+          </div>
+          <div class="card">
+            <h3>梗百科同步</h3>
+            <div id="memewiki-box" class="muted">检测中…</div>
+            <div class="btn-row mt">
+              <button class="btn primary" id="btn-sync">立即同步</button>
+              <button class="btn" id="btn-export">导出 JSONL</button>
+            </div>
+            <p class="muted small">只增不改：词条已存在则跳过，释义冲突进入审核队列；群黑话不会写入梗百科。</p>
+          </div>
+        </div>
+        <div class="card">
+          <h3>可用模型（AstrBot Provider）</h3>
+          <div id="provider-box" class="muted">加载中…</div>
+        </div>
+        <div class="card">
+          <h3>最近任务</h3>
+          <div id="recent-tasks" class="muted">暂无任务</div>
+        </div>
+      </section>
+
+      <!-- 单条解析 -->
+      <section class="panel" id="panel-parse">
+        <h1>单条解析</h1>
+        <div class="card">
+          <label class="lbl">视频链接或 BV 号</label>
+          <div class="input-row">
+            <input id="parse-url" type="text" placeholder="https://www.bilibili.com/video/BV1xx411c7mD 或 BV1xx411c7mD" />
+            <button class="btn primary" id="btn-parse">开始解析</button>
+          </div>
+          <label class="chk"><input type="checkbox" id="parse-force" /> 强制重解析（忽略已入库记录）</label>
+          <p class="muted small">解析在后台队列执行，可关闭页面；进度见下方任务列表。仅入库「词条 + 释义 + 出处」，不保存全文字幕。</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>任务进度</h3><button class="btn small" id="btn-refresh-tasks">刷新</button></div>
+          <div id="task-list" class="muted">暂无任务</div>
+        </div>
+      </section>
+
+      <!-- 合集 -->
+      <section class="panel" id="panel-collection">
+        <h1>合集解析</h1>
+        <div class="card">
+          <label class="lbl">合集 / 系列链接</label>
+          <input id="col-url" type="text" placeholder="https://space.bilibili.com/123456/channel/collectiondetail?sid=7890" />
+          <label class="chk"><input type="checkbox" id="col-force" /> 强制重解析</label>
+          <div class="btn-row"><button class="btn primary" id="btn-collection">加入队列</button></div>
+          <p class="muted small">合集按顺序串行解析，遇到风控或登录失效会立即暂停剩余条目；单条失败不影响后续。</p>
+        </div>
+        <div class="card">
+          <h3>合集任务</h3>
+          <div id="col-task-list" class="muted">暂无任务</div>
+        </div>
+      </section>
+
+      <!-- 词条 -->
+      <section class="panel" id="panel-memes">
+        <h1>词条库</h1>
+        <div class="card">
+          <div class="input-row">
+            <input id="meme-query" type="text" placeholder="搜索词条 / 别名 / 释义" />
+            <select id="meme-status">
+              <option value="">全部状态</option>
+              <option value="published">已发布</option>
+              <option value="draft">草稿</option>
+              <option value="archived">已归档</option>
+            </select>
+            <button class="btn" id="btn-meme-search">搜索</button>
+          </div>
+          <div id="meme-count" class="muted small"></div>
+          <div class="table-wrap"><table id="meme-table"></table></div>
+          <div class="btn-row"><button class="btn" id="btn-meme-more">加载更多</button></div>
+        </div>
+      </section>
+
+      <!-- 审核 -->
+      <section class="panel" id="panel-reviews">
+        <h1>审核队列</h1>
+        <div class="card">
+          <div class="card-head"><h3>待处理</h3><button class="btn small" id="btn-review-refresh">刷新</button></div>
+          <div id="review-list" class="muted">暂无待审核项</div>
+        </div>
+      </section>
+
+      <!-- 黑话 -->
+      <section class="panel" id="panel-slangs">
+        <h1>群黑话</h1>
+        <div class="card">
+          <div class="input-row">
+            <input id="slang-scope" type="text" placeholder="作用域，如 group:123456789" />
+            <button class="btn" id="btn-slang-load">加载</button>
+          </div>
+          <p class="muted small">群黑话只在对应群/会话生效，不写入梗百科；聊天时优先于公共梗库匹配。</p>
+        </div>
+        <div class="card">
+          <h3>新增 / 覆盖</h3>
+          <div class="grid-2">
+            <input id="slang-term" type="text" placeholder="黑话名称（2–24 字）" />
+            <input id="slang-aliases" type="text" placeholder="别名，逗号分隔（可空）" />
+          </div>
+          <textarea id="slang-def" rows="3" placeholder="释义（必填）"></textarea>
+          <button class="btn primary" id="btn-slang-save">保存</button>
+        </div>
+        <div class="card">
+          <h3>当前作用域</h3>
+          <div id="slang-list" class="muted">请先填写作用域并加载</div>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="panel" id="panel-settings">
+        <h1>设置</h1>
+        <div class="card">
+          <h3>模型与抽取</h3>
+          <div id="settings-form" class="form"></div>
+          <div class="btn-row"><button class="btn primary" id="btn-settings-save">保存设置</button></div>
+          <div id="settings-warn" class="warn" hidden></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="./qrcode.min.js"></script>
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
