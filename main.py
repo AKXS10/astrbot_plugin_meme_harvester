@@ -49,7 +49,7 @@ def _data_dir() -> Path:
     "MemeHarvester",
     "从 B 站字幕自动抽取网络梗，支持合集批量解析、WebUI 管理与梗百科同步",
     __version__,
-    "https://github.com/",
+    "https://github.com/your-name/astrbot_plugin_meme_harvester",
 )
 class MemeHarvesterPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
