@@ -67,6 +67,26 @@ class Settings:
     inject_enabled: bool = True
     inject_max_chars: int = 600
     user_agent: str = DEFAULT_UA
+    # ---- 多平台视频（字幕优先，无字幕再本地转写） ----
+    media_enabled: bool = True
+    transcribe_enabled: bool = True
+    whisper_model: str = "small"
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
+    transcribe_language: str = ""
+    media_max_duration: int = 5400
+    transcribe_timeout: int = 1800
+    download_timeout: int = 600
+    ytdlp_cookies_file: str = ""
+    ytdlp_proxy: str = ""
+    keep_temp_files: bool = False
+    # ---- 网页 / Wiki 抓取 ----
+    web_enabled: bool = True
+    web_timeout: int = 20
+    web_max_bytes: int = 2_000_000
+    web_min_chars: int = 200
+    web_cookies: str = ""
+    max_source_chars: int = 60_000
 
     @classmethod
     def from_config(cls, config: dict[str, Any] | None) -> "Settings":
@@ -91,6 +111,38 @@ class Settings:
             inject_enabled=_as_bool(raw.get("inject_enabled"), True),
             inject_max_chars=_as_int(raw.get("inject_max_chars"), 600, minimum=0, maximum=4000),
             user_agent=str(raw.get("user_agent") or DEFAULT_UA).strip() or DEFAULT_UA,
+            media_enabled=_as_bool(raw.get("media_enabled"), True),
+            transcribe_enabled=_as_bool(raw.get("transcribe_enabled"), True),
+            whisper_model=_whisper_model(raw.get("whisper_model")),
+            whisper_device=_choice(raw.get("whisper_device"), ("cpu", "cuda", "auto"), "cpu"),
+            whisper_compute_type=_choice(
+                raw.get("whisper_compute_type"),
+                ("int8", "int8_float16", "float16", "float32"),
+                "int8",
+            ),
+            transcribe_language=str(raw.get("transcribe_language") or "").strip(),
+            media_max_duration=_as_int(
+                raw.get("media_max_duration"), 5400, minimum=30, maximum=43_200
+            ),
+            transcribe_timeout=_as_int(
+                raw.get("transcribe_timeout"), 1800, minimum=60, maximum=14_400
+            ),
+            download_timeout=_as_int(
+                raw.get("download_timeout"), 600, minimum=30, maximum=3600
+            ),
+            ytdlp_cookies_file=str(raw.get("ytdlp_cookies_file") or "").strip(),
+            ytdlp_proxy=str(raw.get("ytdlp_proxy") or "").strip(),
+            keep_temp_files=_as_bool(raw.get("keep_temp_files"), False),
+            web_enabled=_as_bool(raw.get("web_enabled"), True),
+            web_timeout=_as_int(raw.get("web_timeout"), 20, minimum=3, maximum=120),
+            web_max_bytes=_as_int(
+                raw.get("web_max_bytes"), 2_000_000, minimum=50_000, maximum=20_000_000
+            ),
+            web_min_chars=_as_int(raw.get("web_min_chars"), 200, minimum=0, maximum=10_000),
+            web_cookies=str(raw.get("web_cookies") or "").strip(),
+            max_source_chars=_as_int(
+                raw.get("max_source_chars"), 60_000, minimum=2_000, maximum=500_000
+            ),
         )
 
     def merge(self, overrides: dict[str, Any]) -> "Settings":
@@ -108,4 +160,19 @@ class Settings:
             problems.append("并发大于 1 时建议把请求间隔提高到 1 秒以上，否则容易触发风控。")
         if self.max_chunks * self.chunk_chars > 320_000:
             problems.append("单视频最大抽取文本量过大，可能显著增加模型费用。")
+        if self.transcribe_enabled and self.whisper_model in ("medium", "large-v3") and self.whisper_device == "cpu":
+            problems.append("在 CPU 上用 medium/large 模型转写会非常慢，建议改用 small 或提供 GPU。")
+        if self.media_max_duration > 7200:
+            problems.append("单条媒体时长上限超过 2 小时，本地转写可能需要很久。")
         return problems
+
+
+def _choice(value: Any, allowed: tuple[str, ...], default: str) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in allowed else default
+
+
+def _whisper_model(value: Any) -> str:
+    text = str(value or "").strip() or "small"
+    allowed = {"tiny", "base", "small", "medium", "large-v3", "large"}
+    return text if text in allowed else "small"

@@ -25,6 +25,62 @@ DEFAULT_UA = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
+#: yt-dlp 能处理的常见视频站点（只用于路由判断，实际解析交给 yt-dlp）
+MEDIA_HOSTS = (
+    "youtube.com",
+    "youtu.be",
+    "m.youtube.com",
+    "bilibili.tv",
+    "douyin.com",
+    "v.douyin.com",
+    "iesdouyin.com",
+    "tiktok.com",
+    "vm.tiktok.com",
+    "x.com",
+    "twitter.com",
+    "t.co",
+    "instagram.com",
+    "facebook.com",
+    "fb.watch",
+    "vimeo.com",
+    "youku.com",
+    "iqiyi.com",
+    "v.qq.com",
+    "weibo.com",
+    "weibo.cn",
+    "t.cn",
+    "xiaohongshu.com",
+    "xhslink.com",
+    "soundcloud.com",
+    "podcasts.apple.com",
+    "open.spotify.com",
+)
+
+#: 已知 MediaWiki 站点（优先走 api.php，失败再退回 HTML）
+WIKI_HOSTS = (
+    "moegirl.org.cn",
+    "zh.moegirl.org.cn",
+    "wikipedia.org",
+    "mediawiki.org",
+    "fandom.com",
+    "wikia.com",
+    "wikiwand.com",
+)
+
+#: 直链媒体扩展名（URL 以这些结尾时按音视频处理）
+MEDIA_EXTENSIONS = (
+    ".mp4",
+    ".mkv",
+    ".webm",
+    ".mov",
+    ".flv",
+    ".m4a",
+    ".mp3",
+    ".wav",
+    ".ogg",
+    ".flac",
+)
+
 #: 规则快筛关键词：命中任一词的片段进入 LLM 精抽
 CANDIDATE_KEYWORDS = (
     "梗",
@@ -66,6 +122,12 @@ class ErrorCode(str, Enum):
     SSRF_BLOCKED = "SSRF_BLOCKED"
     BAD_URL = "BAD_URL"
     COLLECTION_EMPTY = "COLLECTION_EMPTY"
+    MEDIA_UNSUPPORTED = "MEDIA_UNSUPPORTED"
+    DOWNLOAD_FAILED = "DOWNLOAD_FAILED"
+    ASR_UNAVAILABLE = "ASR_UNAVAILABLE"
+    TRANSCRIBE_FAILED = "TRANSCRIBE_FAILED"
+    WEB_FETCH_FAILED = "WEB_FETCH_FAILED"
+    WEB_CONTENT_EMPTY = "WEB_CONTENT_EMPTY"
     INTERNAL = "INTERNAL"
 
 
@@ -83,34 +145,40 @@ ERROR_MESSAGES = {
     ErrorCode.LLM_JSON_INVALID: "模型输出不是合法 JSON，已转审核队列。",
     ErrorCode.MEMEWIKI_UNAVAILABLE: "未找到梗百科插件，词条只保存在本插件词库。",
     ErrorCode.MEMEWIKI_SCHEMA_MISMATCH: "梗百科版本不匹配，已降级为导出文件。",
-    ErrorCode.SSRF_BLOCKED: "链接不在允许的域名内，已拒绝。",
+    ErrorCode.SSRF_BLOCKED: "链接指向内网/本机地址，已拒绝（防 SSRF）。",
     ErrorCode.BAD_URL: "无法识别的视频链接。",
     ErrorCode.COLLECTION_EMPTY: "该合集没有可解析的视频。",
+    ErrorCode.MEDIA_UNSUPPORTED: "暂不支持该视频站点；可安装 yt-dlp 扩展后重试。",
+    ErrorCode.DOWNLOAD_FAILED: "媒体下载失败（可能需要 Cookie、代理或该站点限制）。",
+    ErrorCode.ASR_UNAVAILABLE: "未安装本地转写依赖（faster-whisper），无法把音频转成文本。",
+    ErrorCode.TRANSCRIBE_FAILED: "本地转写失败，请查看 AstrBot 日志或换更小的模型。",
+    ErrorCode.WEB_FETCH_FAILED: "网页抓取失败（超时、403 或该站点禁止抓取）。",
+    ErrorCode.WEB_CONTENT_EMPTY: "网页正文为空或太短，未提取到可用内容。",
     ErrorCode.INTERNAL: "内部错误，请查看 AstrBot 日志。",
 }
 
-EXTRACT_SYSTEM_PROMPT = """你是一个中文网络梗词条编辑。给你一段 B 站视频字幕（带时间轴），请从中抽取真正的「网络梗 / 黑话 / 流行语」，输出 JSON。
+EXTRACT_SYSTEM_PROMPT = """你是一个中文网络梗词条编辑。给你一段文本（B 站/其它平台视频字幕，或萌娘百科、Wiki、网页正文），请从中抽取真正的「网络梗 / 黑话 / 流行语」，输出 JSON。
 
 要求：
 1. 只输出 JSON，不要 Markdown 代码块，不要解释。
 2. 顶层是对象：{"memes": [...]}。
 3. 每个元素字段：
-   - term: 梗的名称（2-16 字，尽量用字幕里出现的写法）
+   - term: 梗的名称（2-16 字，尽量用原文里出现的写法）
    - aliases: 别名数组（没有就给 []）
    - definition: 一句话释义，40-120 字，说清「是什么、怎么来的」
    - usage: 使用场景或例句，不超过 80 字，没有就给 ""
-   - quote: 字幕中支撑该词条的原文片段（必须逐字摘录，不得改写）
-   - start_ms: quote 在字幕中的起始毫秒（整数）
+   - quote: 原文中支撑该词条的片段（必须逐字摘录，不得改写）
+   - start_ms: quote 在字幕中的起始毫秒（整数；网页文本没有时间轴就填 0）
    - confidence: 0-1 的置信度（越确定越高）
    - tags: 2-4 个标签数组
-4. 不要编造字幕里没有依据的词条；quote 必须能在输入字幕中找到。
+4. 不要编造原文里没有依据的词条；quote 必须能在输入文本中找到。
 5. 人名、地名、普通名词、单纯的情绪词不算梗。宁缺毋滥。
 6. 最多输出 8 条，按置信度从高到低排序。"""
 
-EXTRACT_USER_TEMPLATE = """视频标题：{title}
-视频作者：{owner}
+EXTRACT_USER_TEMPLATE = """内容标题：{title}
+作者/来源：{owner}
 
-字幕片段（每行格式：起始毫秒|文本）：
+文本片段（每行格式：起始毫秒|文本）：
 {lines}
 
 请抽取词条并输出 JSON。"""

@@ -70,10 +70,15 @@ class VideoInfo:
     page_no: int = 0
     is_charge_blocked: bool = False
     pages: list[dict[str, Any]] = field(default_factory=list)
+    platform: str = "bilibili"
+    video_id_override: str = ""
+    url: str = ""
 
     @property
     def video_key(self) -> str:
-        """多 P 视频按 P 区分，避免同一 bvid 互相覆盖。"""
+        """多 P 视频按 P 区分，避免同一 bvid 互相覆盖；其它平台用显式 id。"""
+        if self.video_id_override:
+            return self.video_id_override
         if self.page_no > 1:
             return f"{self.bvid}_p{self.page_no}"
         return self.bvid

@@ -23,6 +23,10 @@ from .harvester.llm import LLMService
 from .harvester.memewiki import MemewikiAdapter
 from .harvester.pipeline import VideoPipeline, VideoResult
 from .harvester.search import MemeSearch
+from .harvester.sources.asr import Transcriber
+from .harvester.sources.classify import classify_url
+from .harvester.sources.media import MediaResolver
+from .harvester.sources.webpage import WebPageResolver
 from .harvester.storage import Storage
 from .harvester.tasks import TaskQueue
 
@@ -63,12 +67,20 @@ class MemeHarvesterPlugin(Star):
         self.client = BiliClient(AiohttpTransport())
         self.llm = LLMService(context, self._get_settings)
         self.extractor = MemeExtractor(self.llm.complete_json)
+        self.transcriber = Transcriber(self._get_settings, logger=logger)
+        self.media = MediaResolver(
+            AiohttpTransport(), self._get_settings, transcriber=self.transcriber, logger=logger
+        )
+        self.web = WebPageResolver(AiohttpTransport(), self._get_settings, logger=logger)
         self.pipeline = VideoPipeline(
             self.client,
             self.storage,
             self.extractor,
             self._get_settings,
             logger=logger,
+            media_resolver=self.media,
+            web_resolver=self.web,
+            tmp_root=self.data_dir / "tmp",
         )
         self.queue = TaskQueue(
             self.storage,
@@ -170,28 +182,28 @@ class MemeHarvesterPlugin(Star):
 
     @filter.command("梗解析")
     async def cmd_parse(self, event: AstrMessageEvent, url: str = "") -> None:
-        """解析单条 B 站视频并抽取梗：/梗解析 <链接或 BV 号>"""
+        """解析视频 / 网页并抽取梗：/梗解析 <链接>"""
         raw = (url or "").strip()
         if not raw:
-            yield event.plain_result("用法：/梗解析 <B 站视频链接或 BV 号>")
+            yield event.plain_result(
+                "用法：/梗解析 <B 站视频/BV 号、其它平台视频链接、百科网页链接>\n"
+                "合集请在插件 WebUI 的「合集解析」页提交。"
+            )
             return
-        target = parse_target(raw)
-        if target.kind == "short":
-            try:
-                await self.ensure_started()
-                final = await self.client.resolve_short_link(raw)
-                target = parse_target(final)
-            except BiliError as exc:
-                yield event.plain_result(f"短链解析失败：{exc}")
-                return
-        if target.kind != "video" or not (target.bvid or target.aid):
-            yield event.plain_result("无法识别的视频链接。合集请到插件 WebUI 的「合集解析」页提交。")
+        route = classify_url(raw)
+        if route.kind == "unsupported":
+            yield event.plain_result(route.reason or "无法识别的链接。")
             return
-        yield event.plain_result("开始解析，视频较长时需要几十秒…")
+        if route.kind in ("season", "series"):
+            yield event.plain_result("这是合集/系列链接，请到插件 WebUI 的「合集解析」页提交。")
+            return
+        yield event.plain_result("开始解析，视频或页面较长时需要几十秒到几分钟…")
         try:
-            result = await self.parse_video(target.bvid or f"av{target.aid}", page=target.page)
+            await self.ensure_started()
+            result = await self.pipeline.process_url(raw)
         except BiliError as exc:
-            yield event.plain_result(ERROR_MESSAGES.get(exc.code, str(exc)))
+            hint = ERROR_MESSAGES.get(exc.code, "")
+            yield event.plain_result(f"解析失败：{hint or exc}")
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("[meme_harvester] 解析失败")
@@ -243,19 +255,23 @@ class MemeHarvesterPlugin(Star):
     @staticmethod
     def _format_result(result: VideoResult) -> str:
         if result.status == "skipped":
-            return f"已解析过：{result.title or result.bvid}（跳过）"
+            return f"已解析过：{result.title or result.video_key}（跳过）"
         if result.status == "failed":
             try:
                 hint = ERROR_MESSAGES.get(ErrorCode(result.error), "")
             except ValueError:
                 hint = ""
             return f"解析失败：{hint or result.error}"
+        label = result.bvid or result.video_key
         lines = [
-            f"《{result.title or result.bvid}》解析完成",
-            f"字幕轨：{result.track_lan or '-'}（{result.provider}）｜分块 {result.chunks}",
+            f"《{result.title or label}》解析完成",
+            f"来源：{result.platform or 'bilibili'}｜文本轨：{result.track_lan or '-'}（{result.provider}）"
+            f"｜分块 {result.chunks}",
             f"抽取 {result.memes_total} 条，新增 {result.memes_created} 条，"
             f"冲突 {result.conflicts}，待审核 {result.reviews}",
         ]
         if result.provider.startswith("ai"):
             lines.append("提示：该视频只有 AI 字幕，个别专有名词可能有识别误差。")
+        elif result.provider == "whisper":
+            lines.append("提示：本地转写可能有错字，专有名词建议人工核对。")
         return "\n".join(lines)

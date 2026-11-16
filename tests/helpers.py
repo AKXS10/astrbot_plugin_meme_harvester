@@ -25,8 +25,22 @@ class FakeTransport:
         self.calls: list[dict[str, Any]] = []
         self.closed = False
 
-    async def get(self, url: str, *, params: dict | None = None, headers: dict | None = None) -> HttpResponse:
-        self.calls.append({"url": url, "params": dict(params or {}), "headers": dict(headers or {})})
+    async def get(
+        self,
+        url: str,
+        *,
+        params: dict | None = None,
+        headers: dict | None = None,
+        max_bytes: int | None = None,
+    ) -> HttpResponse:
+        self.calls.append(
+            {
+                "url": url,
+                "params": dict(params or {}),
+                "headers": dict(headers or {}),
+                "max_bytes": max_bytes,
+            }
+        )
         result = self.handler(url, dict(params or {}), dict(headers or {}))
         if isinstance(result, HttpResponse):
             return result

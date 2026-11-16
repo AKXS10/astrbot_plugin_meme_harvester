@@ -82,13 +82,17 @@
       <section class="panel" id="panel-parse">
         <h1>单条解析</h1>
         <div class="card">
-          <label class="lbl">视频链接或 BV 号</label>
+          <label class="lbl">视频 / 网页链接或 BV 号</label>
           <div class="input-row">
-            <input id="parse-url" type="text" placeholder="https://www.bilibili.com/video/BV1xx411c7mD 或 BV1xx411c7mD" />
+            <input id="parse-url" type="text" placeholder="B 站：https://www.bilibili.com/video/BV1xx411c7mD，或 YouTube / 萌娘百科等链接" />
             <button class="btn primary" id="btn-parse">开始解析</button>
           </div>
           <label class="chk"><input type="checkbox" id="parse-force" /> 强制重解析（忽略已入库记录）</label>
-          <p class="muted small">解析在后台队列执行，可关闭页面；进度见下方任务列表。仅入库「词条 + 释义 + 出处」，不保存全文字幕。</p>
+          <p class="muted small">
+            解析在后台队列执行，可关闭页面；进度见下方任务列表。B 站优先取 CC/AI 字幕；其它平台先取平台字幕，
+            没有字幕且已安装 faster-whisper 时下载音频本地转写；萌娘百科 / MediaWiki 走 API，普通网页提取正文。
+            仅入库「词条 + 释义 + 出处」，不保存全文字幕。
+          </p>
         </div>
         <div class="card">
           <div class="card-head"><h3>任务进度</h3><button class="btn small" id="btn-refresh-tasks">刷新</button></div>

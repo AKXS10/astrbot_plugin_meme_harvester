@@ -136,6 +136,14 @@ class TaskQueue:
                 progress=progress,
             )
             return result.to_dict()
+        if kind == "url":
+            result = await self.pipeline.process_url(
+                str(payload.get("url") or target),
+                page=int(payload.get("page") or 1),
+                force=bool(payload.get("force")),
+                progress=progress,
+            )
+            return result.to_dict()
         if kind == "collection":
             parsed = ParsedTarget(
                 kind=str(payload.get("target_kind") or "season"),

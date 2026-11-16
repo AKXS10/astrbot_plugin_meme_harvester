@@ -1,7 +1,9 @@
-"""单视频 / 合集处理流水线。"""
+"""单视频 / 合集 / 多平台 URL 处理流水线。"""
 
 from __future__ import annotations
 
+import shutil
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -14,12 +16,15 @@ from .bili.subtitle import (
     provider_label,
     segments_text_hash,
 )
-from .bili.urls import ParsedTarget
+from .bili.urls import ParsedTarget, parse_target
 from .constants import ErrorCode
 from .extractor import ExtractOutcome, MemeExtractor
 from .models import Segment, VideoInfo
+from .sources.classify import classify_url
+from .sources.media import MediaResolver
+from .sources.webpage import WebPageResolver
 from .storage import Storage
-from .text import segments_to_plain, split_chunks, truncate
+from .text import segments_to_plain, split_chunks
 
 ProgressFn = Callable[[str, int], Awaitable[None]]
 
@@ -29,6 +34,8 @@ class VideoResult:
     bvid: str = ""
     video_key: str = ""
     title: str = ""
+    platform: str = ""
+    url: str = ""
     status: str = "done"
     error: str = ""
     provider: str = ""
@@ -47,6 +54,8 @@ class VideoResult:
             "bvid": self.bvid,
             "video_key": self.video_key,
             "title": self.title,
+            "platform": self.platform,
+            "url": self.url,
             "status": self.status,
             "error": self.error,
             "provider": self.provider,
@@ -72,6 +81,9 @@ class VideoPipeline:
         *,
         logger: Any = None,
         on_video_done: Callable[[VideoResult], Awaitable[None]] | None = None,
+        media_resolver: MediaResolver | None = None,
+        web_resolver: WebPageResolver | None = None,
+        tmp_root: Path | str | None = None,
     ) -> None:
         self.client = client
         self.storage = storage
@@ -79,6 +91,9 @@ class VideoPipeline:
         self._settings = settings_getter
         self._logger = logger
         self._on_video_done = on_video_done
+        self.media = media_resolver
+        self.web = web_resolver
+        self.tmp_root = Path(tmp_root) if tmp_root else None
 
     async def _progress(self, fn: ProgressFn | None, stage: str, pct: int) -> None:
         if fn is not None:
@@ -96,7 +111,7 @@ class VideoPipeline:
         progress: ProgressFn | None = None,
     ) -> VideoResult:
         settings = self._settings()
-        result = VideoResult(bvid=bvid)
+        result = VideoResult(bvid=bvid, platform="bilibili")
         await self._progress(progress, "resolving", 5)
 
         info = await self.client.get_video_info(bvid=bvid)
@@ -269,6 +284,230 @@ class VideoPipeline:
             summary["items"].append(result.to_dict())
 
         return summary
+
+
+    # ------------------------------------------------------- 多平台 / 网页
+
+    async def process_url(
+        self,
+        raw: str,
+        *,
+        page: int = 1,
+        force: bool = False,
+        progress: ProgressFn | None = None,
+    ) -> VideoResult:
+        """按链接类型分派：B 站 / 其它媒体 / Wiki / 普通网页。"""
+        route = classify_url(raw)
+        if route.kind == "bilibili":
+            target = parse_target(route.url)
+            if target.kind == "short":
+                final = await self.client.resolve_short_link(route.url)
+                target = parse_target(final)
+            if target.kind in ("season", "series"):
+                raise BiliError(
+                    ErrorCode.BAD_URL, "这是合集/系列链接，请在「合集解析」页提交"
+                )
+            if target.kind != "video":
+                raise BiliError(ErrorCode.BAD_URL, target.reason or "无法识别的 B 站链接")
+            bvid = target.bvid or f"av{target.aid}"
+            return await self.process_video(
+                bvid, page=page or target.page, force=force, progress=progress
+            )
+        if route.kind == "media":
+            return await self.process_media(route.url, force=force, progress=progress)
+        if route.kind in ("wiki", "web"):
+            return await self.process_page(route.url, force=force, progress=progress)
+        raise BiliError(ErrorCode.BAD_URL, route.reason or "无法识别的链接")
+
+    async def process_media(
+        self,
+        url: str,
+        *,
+        force: bool = False,
+        progress: ProgressFn | None = None,
+    ) -> VideoResult:
+        if self.media is None:
+            raise BiliError(ErrorCode.MEDIA_UNSUPPORTED, "媒体解析未启用")
+        settings = self._settings()
+        await self._progress(progress, "probing", 10)
+        job_dir = self._job_dir()
+        try:
+            outcome = await self.media.resolve(url, job_dir)
+            return await self._analyze(
+                platform=outcome.platform,
+                source_id=outcome.source_id,
+                title=outcome.title,
+                owner=outcome.uploader,
+                origin=outcome.url,
+                url=outcome.url,
+                segments=outcome.segments,
+                provider=outcome.provider,
+                lang=outcome.lang,
+                notes=outcome.notes,
+                force=force,
+                progress=progress,
+            )
+        finally:
+            if not settings.keep_temp_files:
+                shutil.rmtree(job_dir, ignore_errors=True)
+
+    async def process_page(
+        self,
+        url: str,
+        *,
+        force: bool = False,
+        progress: ProgressFn | None = None,
+    ) -> VideoResult:
+        if self.web is None:
+            raise BiliError(ErrorCode.WEB_FETCH_FAILED, "网页抓取未启用")
+        await self._progress(progress, "fetching_page", 10)
+        doc = await self.web.fetch(url)
+        return await self._analyze(
+            platform=doc.platform,
+            source_id=doc.source_id,
+            title=doc.title,
+            owner=doc.author,
+            origin=url,
+            url=url,
+            segments=doc.segments,
+            provider=doc.provider,
+            lang=doc.lang,
+            notes=doc.notes,
+            force=force,
+            progress=progress,
+        )
+
+    async def _analyze(
+        self,
+        *,
+        platform: str,
+        source_id: str,
+        title: str,
+        owner: str,
+        origin: str,
+        url: str,
+        segments: list[Segment],
+        provider: str,
+        lang: str,
+        notes: list[str] | None = None,
+        force: bool = False,
+        progress: ProgressFn | None = None,
+    ) -> VideoResult:
+        settings = self._settings()
+        result = VideoResult(video_key=source_id, title=title, platform=platform, url=url)
+        result.notes.extend(notes or [])
+        result.segments = len(segments)
+        result.provider = provider
+        result.track_lan = lang
+        await self._progress(progress, "resolving", 5)
+
+        existing = await self.storage.get_video(source_id, platform=platform)
+        if existing and existing.get("status") == "done" and not force:
+            result.status = "skipped"
+            result.notes.append("已解析过，跳过（可用 force 重跑）")
+            return result
+
+        info = VideoInfo(
+            bvid="",
+            title=title,
+            owner_name=owner,
+            platform=platform,
+            video_id_override=source_id,
+            url=url,
+        )
+        video_db_id = await self.storage.upsert_video(info, "processing")
+        try:
+            if not segments:
+                raise BiliError(ErrorCode.NO_SUBTITLE, "没有可用的文本内容。")
+            text_hash = segments_text_hash(segments)
+            await self.storage.add_transcript(
+                video_db_id, lang or provider, provider, segments, text_hash
+            )
+
+            await self._progress(progress, "extracting", 45)
+            chunks = split_chunks(
+                segments,
+                chunk_chars=settings.chunk_chars,
+                max_chunks=settings.max_chunks,
+            )
+            result.chunks = len(chunks)
+            outcome: ExtractOutcome = await self.extractor.extract(
+                title,
+                owner,
+                chunks,
+                plain_text=segments_to_plain(segments),
+            )
+            if outcome.used_fallback:
+                result.notes.append("未命中梗关键词，已用前两段内容兜底抽取")
+            if outcome.failed_chunks:
+                result.notes.append(f"{outcome.failed_chunks} 个内容块抽取失败")
+
+            await self._progress(progress, "storing", 80)
+            result.memes_total = len(outcome.candidates)
+            default_status = "published" if not settings.review_required else "draft"
+            for candidate in outcome.candidates:
+                upsert = await self.storage.upsert_meme(
+                    candidate,
+                    origin=origin,
+                    video_db_id=video_db_id,
+                    default_status=default_status,
+                    min_confidence=settings.memewiki_min_confidence,
+                )
+                if upsert.created:
+                    result.memes_created += 1
+                if upsert.conflict:
+                    result.conflicts += 1
+                    review_id = await self.storage.add_review(
+                        "conflict",
+                        {
+                            "meme_id": upsert.meme_id,
+                            "term": candidate.term,
+                            "incoming": candidate.to_dict(),
+                            "source": origin,
+                        },
+                        reason=upsert.conflict,
+                        dedupe_key=f"conflict:{upsert.meme_id}:{text_hash[:8]}",
+                    )
+                    if review_id:
+                        result.reviews += 1
+
+            await self.storage.set_video_status(source_id, "done", platform=platform)
+            await self.storage.add_log(
+                "info",
+                "source_done",
+                f"{source_id}（{platform}）抽取 {result.memes_total} 条，新增 {result.memes_created} 条",
+            )
+            result.status = "done"
+        except BiliError as exc:
+            result.status = "failed"
+            result.error = exc.code.value
+            await self.storage.set_video_status(
+                source_id, "failed", f"{exc.code.value}: {exc}", platform=platform
+            )
+            await self.storage.add_log("error", "source_failed", f"{source_id}: {exc.code.value} {exc}")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            result.status = "failed"
+            result.error = ErrorCode.INTERNAL.value
+            await self.storage.set_video_status(
+                source_id, "failed", str(exc)[:300], platform=platform
+            )
+            await self.storage.add_log("error", "source_error", f"{source_id}: {exc}")
+            raise
+
+        await self._progress(progress, "done", 100)
+        if self._on_video_done is not None:
+            try:
+                await self._on_video_done(result)
+            except Exception:
+                pass
+        return result
+
+    def _job_dir(self) -> Path:
+        root = self.tmp_root or (Path(self.storage.db_path).parent / "tmp")
+        job = Path(root) / f"job-{uuid.uuid4().hex[:8]}"
+        job.mkdir(parents=True, exist_ok=True)
+        return job
 
 
 def build_extractor(complete_fn, settings) -> MemeExtractor:

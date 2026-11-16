@@ -1,3 +1,5 @@
-# 无第三方运行时依赖。
-# 仅使用 AstrBot 内置的 aiohttp、Python 标准库 sqlite3/json/asyncio。
-# 可选：cryptography 用于加密 Cookie（AstrBot 环境通常已自带，缺失时降级为明文并告警）。
+# 无必需第三方依赖：B 站解析与网页抓取只用 AstrBot 内置的 aiohttp + Python 标准库。
+# 可选（按需安装，缺失时相关任务返回可诊断错误码，不影响其它功能）：
+#   yt-dlp          # 其它视频平台（YouTube / 抖音 / TikTok / 优酷 等）
+#   faster-whisper  # 无字幕时的本地音频转写（CPU 可跑，建议 small 及以下模型）
+# cryptography 用于加密 Cookie（AstrBot 环境通常已自带，缺失时降级为明文并告警）。

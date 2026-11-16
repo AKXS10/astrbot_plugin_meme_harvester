@@ -1,17 +1,21 @@
 # 梗采集器 · astrbot_plugin_meme_harvester
 
-从 B 站视频字幕中自动抽取网络梗与黑话，沉淀成本地词条库，供 AstrBot 在聊天时检索、注入提示词，
+从视频字幕与网页正文中自动抽取网络梗与黑话，沉淀成本地词条库，供 AstrBot 在聊天时检索、注入提示词，
 并可一键同步到 [梗百科（astrbot_plugin_memewiki）](https://github.com/PurLango/astrbot_plugin_memewiki)。
 
-> 只收录「词条 + 释义 + 出处（BV 号 / 时间戳）」，不保存全文字幕，支持随时删除。
+支持 B 站（字幕链路完整）以及 yt-dlp 能解析的其它视频平台（有字幕用字幕，没字幕可本地 Whisper 转写），
+也支持萌娘百科 / MediaWiki / 普通网页的正文抓取。只收录「词条 + 释义 + 出处」，不保存全文字幕。
 
 ## 功能
 
 - **单条解析**：粘贴 B 站视频链接 / BV 号，自动抓取 CC 字幕或 AI 字幕，交给 LLM 结构化抽取梗。
+- **多平台视频**：YouTube、抖音、TikTok、X、Vimeo、优酷、腾讯视频等交给 yt-dlp；优先平台字幕，没有字幕且已安装
+  `faster-whisper` 时下载音频在本地转写（临时文件在任务结束后清理，可配置保留）。
+- **网页抓取**：萌娘百科 / 维基百科走 MediaWiki API，其它站点提取正文；正文转成无时间轴分段后走同一套抽取流程。
 - **合集批量解析**：B 站合集（season）、系列（series）链接自动分页、串行入库，带限速与风控熔断。
 - **字幕优先级**：中文 CC 字幕 → 中文 AI 字幕 → AI 字幕搜索接口 → 弹幕接口，逐级兜底。
 - **只增不改**：同名词条不覆盖，释义冲突进「审核队列」人工裁决；重复别名与标签自动并集。
-- **反幻觉**：每条梗必须能在字幕里逐字定位到引用句，定位失败的候选直接丢弃。
+- **反幻觉**：每条梗必须能在来源文本里逐字定位到引用句，定位失败的候选直接丢弃。
 - **群黑话**：按 `group:<群号>` / `private:<QQ号>` 作用域维护自定义黑话，优先于公共梗库命中。
 - **提示词注入**：`on_llm_request` 钩子按消息内容做 n-gram 触发，把相关词条注入 system prompt。
 - **WebUI 七页**：概览、单条解析、合集解析、词条库、审核队列、群黑话、设置。
@@ -23,9 +27,18 @@
 | 项目 | 要求 |
 | --- | --- |
 | AstrBot | ≥ 4.13（推荐 4.24+，`StarTools.get_data_dir` / 页面桥接更完整） |
-| Python | 3.10+（AstrBot 自带依赖即可，**无额外第三方依赖**） |
+| Python | 3.10+（B 站与网页解析零额外依赖） |
+| 可选依赖 | `yt-dlp`（其它平台视频）；`faster-whisper`（无字幕时本地转写，CPU 可跑 int8） |
 | LLM | AstrBot 中已配置的对话模型 Provider（需支持 JSON 输出，不支持时自动降级容错解析） |
 | B 站账号 | 建议使用小号；AI 字幕必须登录态才能获取 |
+
+```bash
+# 可选：开启多平台 / 本地转写
+pip install yt-dlp
+pip install faster-whisper
+```
+
+未安装可选依赖时，B 站与网页解析不受影响；相关任务会以 `MEDIA_UNSUPPORTED` / `ASR_UNAVAILABLE` 明确提示。
 
 ## 安装
 
@@ -67,10 +80,14 @@ git clone https://github.com/<your-name>/astrbot_plugin_meme_harvester.git
 ## 工作流程
 
 ```
-链接 → 解析目标（BV/av/短链/合集/系列）
-     → 取视频信息（/x/web-interface/view）
-     → 取字幕轨（player/wbi/v2 → player/v2 → dm/view，按 CC > AI 排序）
-     → 下载字幕（CDN auth_key 分钟级过期，取到即下）
+链接 → classify_url 分派
+     ├─ B 站：解析目标（BV/av/短链/合集/系列）
+     │    → 取视频信息（/x/web-interface/view）
+     │    → 取字幕轨（player/wbi/v2 → player/v2 → dm/view，按 CC > AI 排序）
+     │    → 下载字幕（CDN auth_key 分钟级过期，取到即下）
+     ├─ 其它平台：yt-dlp 探测字幕 →（有）下载并解析 VTT/SRT
+     │    └（无）下载音频 → faster-whisper 本地转写 → 临时目录清理
+     └─ 网页：MediaWiki API / HTML 正文提取 → 切成无时间轴分段
      → 清洗分段 / 按字数与时间窗分块
      → 关键词快筛 → LLM 结构化抽取（JSON）
      → 引用校验 / 别名归一 / 置信度过滤
@@ -104,6 +121,18 @@ git clone https://github.com/<your-name>/astrbot_plugin_meme_harvester.git
 | `memewiki_enabled` / `memewiki_min_confidence` | `true` / `0.6` | 同步开关与最低置信度 |
 | `inject_enabled` / `inject_max_chars` | `true` / `600` | 聊天注入开关与预算 |
 | `auto_parse_on_link` | `false` | 群里直接发链接是否自动解析（默认关，防刷） |
+| `media_enabled` | `true` | 是否解析 yt-dlp 支持的其它平台（需自行安装 yt-dlp） |
+| `transcribe_enabled` | `true` | 无字幕时是否本地 Whisper 转写（需 faster-whisper） |
+| `whisper_model` / `whisper_device` / `whisper_compute_type` | `small` / `cpu` / `int8` | 转写模型与推理设备；CPU 建议 tiny/base/small |
+| `transcribe_language` | `""` | 转写语言，空 = 自动识别 |
+| `media_max_duration` | `5400` | 单条视频时长上限（秒），超出直接拒绝 |
+| `transcribe_timeout` / `download_timeout` | `1800` / `600` | 转写与音视频下载超时（秒） |
+| `ytdlp_cookies_file` / `ytdlp_proxy` | `""` | yt-dlp 的 Cookie 文件（Netscape 格式）与代理 |
+| `keep_temp_files` | `false` | 任务结束后是否保留临时音频（排查用） |
+| `web_enabled` | `true` | 是否解析网页链接 |
+| `web_timeout` / `web_max_bytes` / `web_min_chars` | `20` / `2000000` / `200` | 网页抓取超时、响应上限、正文最少字数 |
+| `web_cookies` | `""` | 网页抓取 Cookie（可选，部分站点 403 时填写） |
+| `max_source_chars` | `60000` | 单个文本源进入抽取前的最大字数 |
 
 ## 数据与隐私
 
@@ -117,11 +146,14 @@ git clone https://github.com/<your-name>/astrbot_plugin_meme_harvester.git
 
 ## 已知限制
 
-- **抖音不支持**：抖音无字幕接口，硬字幕需 OCR/ASR，成本与稳定性不成正比，故不纳入本插件。
+- **抖音 / 其它平台的可用性取决于 yt-dlp**：抖音提取器受签名与风控影响经常失效，失败时会返回可诊断错误码；
+  平台字幕可用时优先用字幕，不依赖 yt-dlp 的抖音提取器也不做硬字幕 OCR。
+- **本地转写成本**：faster-whisper 在 CPU 上接近 1× 实时，长视频耗时明显；建议 `small` 或更小模型，并限制 `media_max_duration`。
 - **AI 字幕需要登录**：匿名接口返回空字幕轨；登录态失效会提示重新扫码。
 - **字幕覆盖率**：科技、解说、访谈类视频覆盖率高；纯音乐、整活、无解说视频可能没有字幕。
 - **风控**：触发 412 后全局熔断 30 分钟，任务会失败并记录 `RISK_CONTROL`，恢复后重试即可。
-- **长视频截断**：超过 `chunk_chars × max_chunks` 的字幕只处理前 N 块，结果里会标注。
+- **长文本截断**：超过 `chunk_chars × max_chunks` 的文本只处理前 N 块，结果里会标注。
+- **网页抓取**：只取静态 HTML（不执行 JS），SPA 站点可能正文为空；内置 SSRF 防护，拒绝私网与回环地址。
 - **合集速度**：受 1 QPS 限速约束，约 100–200 条/小时。
 
 ## 开发与测试
@@ -135,7 +167,8 @@ export PYTHONPATH="<AstrBot>/backend/app:$PYTHONPATH"
 python -m unittest discover -s tests -t .
 ```
 
-当前测试：**137 个用例**（存储、字幕协议、采集兜底、抽取校验、任务队列、梗百科适配、登录态、WebAPI、插件装配）。
+当前测试：**175 个用例**（存储、字幕协议、采集兜底、抽取校验、任务队列、梗百科适配、登录态、WebAPI、插件装配、
+VTT/SRT 解析、URL 分类、SSRF 防护、网页正文提取、MediaWiki API、yt-dlp 探测与转写回退、多平台流水线）。
 
 目录结构：
 
@@ -143,9 +176,10 @@ python -m unittest discover -s tests -t .
 main.py                 # 插件入口：命令、注入钩子、懒初始化
 harvester/
   bili/                 # B 站采集（URL/WBI/Cookie/客户端/字幕/合集）
+  sources/              # 多来源：URL 分类、VTT/SRT、网页抓取、yt-dlp、Whisper
   storage.py            # SQLite（WAL + FTS5 trigram，降级 LIKE）
   extractor.py          # LLM 抽取 + 反幻觉校验
-  pipeline.py           # 单条 / 合集流水线
+  pipeline.py           # 单条 / 合集 / 多平台 / 网页流水线
   llm.py                # AstrBot Provider 适配与 JSON 降级
   memewiki.py           # 梗百科进程内适配器
   search.py             # 检索与提示词注入

@@ -378,13 +378,14 @@ class Storage:
             conn.execute(
                 "INSERT INTO videos(platform, video_id, bvid, aid, cid, title, owner_name, owner_mid, pubdate, duration, "
                 "season_id, page_no, is_charge_blocked, status, created_at, updated_at) "
-                "VALUES('bilibili', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(platform, video_id) DO UPDATE SET "
                 "aid=excluded.aid, cid=excluded.cid, title=excluded.title, owner_name=excluded.owner_name, "
                 "owner_mid=excluded.owner_mid, pubdate=excluded.pubdate, duration=excluded.duration, "
                 "season_id=excluded.season_id, page_no=excluded.page_no, is_charge_blocked=excluded.is_charge_blocked, "
                 "updated_at=excluded.updated_at",
                 (
+                    info.platform or "bilibili",
                     info.video_key,
                     info.bvid,
                     info.aid,
@@ -403,29 +404,32 @@ class Storage:
                 ),
             )
             row = conn.execute(
-                "SELECT id FROM videos WHERE platform='bilibili' AND video_id=?", (info.video_key,)
+                "SELECT id FROM videos WHERE platform=? AND video_id=?",
+                (info.platform or "bilibili", info.video_key),
             ).fetchone()
             return int(row["id"])
 
     async def upsert_video(self, info: VideoInfo, status: str = "pending") -> int:
         return await self._write(self._upsert_video_sync, info, status)
 
-    async def get_video(self, video_key: str) -> dict[str, Any] | None:
+    async def get_video(self, video_key: str, platform: str = "bilibili") -> dict[str, Any] | None:
         def run() -> dict[str, Any] | None:
             with self._conn() as conn:
                 row = conn.execute(
-                    "SELECT * FROM videos WHERE platform='bilibili' AND video_id=?", (video_key,)
+                    "SELECT * FROM videos WHERE platform=? AND video_id=?", (platform, video_key)
                 ).fetchone()
             return dict(row) if row else None
 
         return await self._read(run)
 
-    async def set_video_status(self, video_key: str, status: str, error: str = "") -> None:
+    async def set_video_status(
+        self, video_key: str, status: str, error: str = "", platform: str = "bilibili"
+    ) -> None:
         def run() -> None:
             with self._conn() as conn:
                 conn.execute(
-                    "UPDATE videos SET status=?, last_error=?, updated_at=? WHERE platform='bilibili' AND video_id=?",
-                    (status, error[:500], utcnow(), video_key),
+                    "UPDATE videos SET status=?, last_error=?, updated_at=? WHERE platform=? AND video_id=?",
+                    (status, error[:500], utcnow(), platform, video_key),
                 )
 
         await self._write(run)

@@ -95,5 +95,101 @@
     "type": "int",
     "description": "单次注入的最大字符数",
     "default": 600
+  },
+  "media_enabled": {
+    "type": "bool",
+    "description": "启用多平台视频解析（YouTube / 抖音 / TikTok 等）",
+    "hint": "需要 AstrBot 环境里安装 yt-dlp；否则仅支持 B 站与网页。",
+    "default": true
+  },
+  "transcribe_enabled": {
+    "type": "bool",
+    "description": "没有现成字幕时，下载音频并本地转写",
+    "hint": "需要安装 faster-whisper；CPU 上转录 1 小时视频通常要几十分钟。",
+    "default": true
+  },
+  "whisper_model": {
+    "type": "string",
+    "description": "Whisper 模型大小（tiny/base/small/medium/large-v3）",
+    "hint": "默认 small；模型会在首次转写时自动下载到 HuggingFace 缓存。",
+    "default": "small"
+  },
+  "whisper_device": {
+    "type": "string",
+    "description": "Whisper 运行设备（cpu/cuda/auto）",
+    "default": "cpu"
+  },
+  "whisper_compute_type": {
+    "type": "string",
+    "description": "Whisper 计算精度（int8/int8_float16/float16/float32）",
+    "default": "int8"
+  },
+  "transcribe_language": {
+    "type": "string",
+    "description": "转写语言（留空自动检测，如 zh/en/ja）",
+    "default": ""
+  },
+  "media_max_duration": {
+    "type": "int",
+    "description": "单条媒体最长时长（秒），超过直接拒绝",
+    "default": 5400
+  },
+  "transcribe_timeout": {
+    "type": "int",
+    "description": "本地转写超时（秒）",
+    "default": 1800
+  },
+  "download_timeout": {
+    "type": "int",
+    "description": "媒体下载超时（秒）",
+    "default": 600
+  },
+  "ytdlp_cookies_file": {
+    "type": "string",
+    "description": "yt-dlp cookies.txt 路径（可选）",
+    "hint": "抖音/小红书等需要登录态的站点可填这里，文件内容等同登录凭证，注意权限。",
+    "default": ""
+  },
+  "ytdlp_proxy": {
+    "type": "string",
+    "description": "yt-dlp 代理地址（可选，如 http://127.0.0.1:7890）",
+    "default": ""
+  },
+  "keep_temp_files": {
+    "type": "bool",
+    "description": "保留下载的音频/字幕临时文件",
+    "hint": "默认关闭：每个任务结束自动清理 data/tmp 下的临时目录。",
+    "default": false
+  },
+  "web_enabled": {
+    "type": "bool",
+    "description": "启用网页 / Wiki 抓取（萌娘百科、维基等）",
+    "default": true
+  },
+  "web_timeout": {
+    "type": "int",
+    "description": "网页抓取超时（秒）",
+    "default": 20
+  },
+  "web_max_bytes": {
+    "type": "int",
+    "description": "单页最大下载字节数",
+    "default": 2000000
+  },
+  "web_min_chars": {
+    "type": "int",
+    "description": "正文少于该字符数视为抓取失败",
+    "default": 200
+  },
+  "web_cookies": {
+    "type": "string",
+    "description": "网页抓取使用的 Cookie（可选，部分站点如萌娘百科 403 时可填）",
+    "hint": "形如 a=1; b=2，仅用于网页抓取，不会写入日志",
+    "default": ""
+  },
+  "max_source_chars": {
+    "type": "int",
+    "description": "单篇内容送入抽取的最大字符数",
+    "default": 60000
   }
 }

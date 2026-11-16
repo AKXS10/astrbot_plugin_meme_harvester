@@ -12,6 +12,7 @@ from .auth import AuthError
 from .bili.client import BiliError
 from .bili.urls import parse_target
 from .constants import ERROR_MESSAGES, PLUGIN_NAME, ErrorCode
+from .sources.classify import classify_url
 
 PREFIX = f"/{PLUGIN_NAME}"
 _BOOL_KEYS = {
@@ -192,7 +193,23 @@ class WebApi:
         body = await _body()
         raw = str(body.get("url") or "").strip()
         if not raw:
-            return _fail("BAD_URL", "请输入视频链接或 BV 号")
+            return _fail("BAD_URL", "请输入视频 / 网页链接或 BV 号")
+        force = bool(body.get("force"))
+        route = classify_url(raw)
+        if route.kind != "bilibili":
+            if route.kind == "unsupported":
+                return _fail(ErrorCode.BAD_URL.value, route.reason or "无法识别的链接")
+            task_id = await self.plugin.queue.submit(
+                "url",
+                route.url,
+                {
+                    "url": route.url,
+                    "force": force,
+                    "kind": route.kind,
+                    "platform": route.platform,
+                },
+            )
+            return _ok({"task_id": task_id, "target": route.url, "kind": route.kind})
         target = parse_target(raw)
         if target.kind == "short":
             final = await self.plugin.client.resolve_short_link(raw)
@@ -206,7 +223,6 @@ class WebApi:
             )
         if target.kind != "video":
             return _fail(ErrorCode.BAD_URL.value, "暂不支持该链接类型")
-        force = bool(body.get("force"))
         page = _to_int(body.get("page") or target.page, 1, 1, 9999)
         video_key = target.bvid or f"av{target.aid}"
         task_id = await self.plugin.queue.submit(
