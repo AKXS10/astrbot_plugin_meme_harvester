@@ -131,6 +131,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(video["status"], "done")
         transcript = await self.storage.get_transcript(video["id"])
         self.assertEqual(transcript["provider"], "cc")
+        self.assertEqual(result.transcript_id, transcript["id"])
+        meme = await self.storage.find_meme("尊嘟假嘟")
+        self.assertEqual(meme["origin"], "https://www.bilibili.com/video/BV1xx411c7mD")
 
     async def test_second_run_skips(self) -> None:
         await self.pipeline.process_video("BV1xx411c7mD")

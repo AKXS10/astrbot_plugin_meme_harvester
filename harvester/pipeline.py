@@ -162,6 +162,9 @@ class VideoPipeline:
             await self.storage.add_transcript(
                 video_db_id, track.lan, result.provider, segments, text_hash
             )
+            stored = await self.storage.get_transcript(video_db_id)
+            if stored:
+                result.transcript_id = int(stored.get("id") or 0)
 
             await self._progress(progress, "extracting", 45)
             chunks = split_chunks(
@@ -184,8 +187,11 @@ class VideoPipeline:
             await self._progress(progress, "storing", 80)
             result.memes_total = len(outcome.candidates)
             default_status = "published" if not settings.review_required else "draft"
+            watch_url = f"https://www.bilibili.com/video/{info.bvid}"
+            if info.page_no > 1:
+                watch_url += f"?p={info.page_no}"
             for candidate in outcome.candidates:
-                origin = f"BV {info.bvid}"
+                origin = watch_url
                 upsert = await self.storage.upsert_meme(
                     candidate,
                     origin=origin,
@@ -423,6 +429,9 @@ class VideoPipeline:
             await self.storage.add_transcript(
                 video_db_id, lang or provider, provider, segments, text_hash
             )
+            stored = await self.storage.get_transcript(video_db_id)
+            if stored:
+                result.transcript_id = int(stored.get("id") or 0)
 
             await self._progress(progress, "extracting", 45)
             chunks = split_chunks(
