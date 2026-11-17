@@ -110,6 +110,7 @@ class ErrorCode(str, Enum):
     LOGIN_EXPIRED = "LOGIN_EXPIRED"
     RISK_CONTROL = "RISK_CONTROL"
     NO_SUBTITLE = "NO_SUBTITLE"
+    SUBTITLE_MISMATCH = "SUBTITLE_MISMATCH"
     CHARGE_BLOCKED = "CHARGE_BLOCKED"
     SUBTITLE_EXPIRED = "SUBTITLE_EXPIRED"
     VIDEO_NOT_FOUND = "VIDEO_NOT_FOUND"
@@ -136,6 +137,7 @@ ERROR_MESSAGES = {
     ErrorCode.LOGIN_EXPIRED: "B 站登录已失效（-101/-352），请重新扫码或更新 Cookie。",
     ErrorCode.RISK_CONTROL: "触发 B 站风控（-412），已暂停采集 30 分钟。",
     ErrorCode.NO_SUBTITLE: "这条视频没有可用字幕（CC / AI 字幕都取不到）。",
+    ErrorCode.SUBTITLE_MISMATCH: "字幕内容与视频时长明显不符（疑似取到了其他视频的字幕），已拒绝入库。",
     ErrorCode.CHARGE_BLOCKED: "充电专属视频未解锁，已跳过。",
     ErrorCode.SUBTITLE_EXPIRED: "字幕下载链接已过期（auth_key 分钟级），正在重试。",
     ErrorCode.VIDEO_NOT_FOUND: "视频不存在或已删除。",

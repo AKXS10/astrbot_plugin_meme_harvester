@@ -38,6 +38,24 @@ def _text_length(segments: list[Segment]) -> int:
     return sum(len(segment.text) for segment in segments)
 
 
+def _assert_timeline(duration: int, segments: list[Segment], *, source: str = "") -> None:
+    """字幕时间轴必须落在视频时长附近，否则判为「串片」。
+
+    B 站未签名接口曾返回其他视频的字幕（视频 196s，字幕却到 1346s），
+    这类数据一旦入库，抽取出的词条会与视频毫无关系。宁可报错也不入库。
+    """
+    if not duration or not segments:
+        return
+    end_ms = max(segment.end_ms for segment in segments)
+    allowed_ms = duration * 1000 * 1.3 + 30_000
+    if end_ms > allowed_ms:
+        raise BiliError(
+            ErrorCode.SUBTITLE_MISMATCH,
+            f"字幕时间轴与视频不符（视频 {duration}s，字幕到 {end_ms / 1000:.0f}s"
+            f"{'，来源 ' + source if source else ''}），疑似取到了其他视频的字幕",
+        )
+
+
 def _split_video_key(key: str) -> tuple[str, int]:
     """把 "BV..." / "av123" 统一成 (bvid, aid) 供 view 接口使用。"""
     key = (key or "").strip()
@@ -227,6 +245,7 @@ class VideoPipeline:
             if best is None:
                 raise BiliError(ErrorCode.NO_SUBTITLE, "字幕内容为空。")
             track, segments, resolved_ai = best
+            _assert_timeline(info.duration, segments, source=track.lan)
             result.track_lan = track.lan
             result.segments = len(segments)
             result.provider = provider_label(track, endpoint, resolved_ai=resolved_ai)
@@ -425,6 +444,7 @@ class VideoPipeline:
                 segments=outcome.segments,
                 provider=outcome.provider,
                 lang=outcome.lang,
+                duration=int(outcome.duration or 0),
                 notes=outcome.notes,
                 force=force,
                 progress=progress,
@@ -471,6 +491,7 @@ class VideoPipeline:
         segments: list[Segment],
         provider: str,
         lang: str,
+        duration: int = 0,
         notes: list[str] | None = None,
         force: bool = False,
         progress: ProgressFn | None = None,
@@ -501,6 +522,7 @@ class VideoPipeline:
         try:
             if not segments:
                 raise BiliError(ErrorCode.NO_SUBTITLE, "没有可用的文本内容。")
+            _assert_timeline(duration, segments, source=provider)
             text_hash = segments_text_hash(segments)
             await self.storage.add_transcript(
                 video_db_id, lang or provider, provider, segments, text_hash

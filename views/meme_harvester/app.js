@@ -45,6 +45,7 @@
     LOGIN_EXPIRED: "B 站登录已失效，请重新扫码登录",
     RISK_CONTROL: "触发 B 站风控，已暂停请求 30 分钟",
     NO_SUBTITLE: "没有可用字幕",
+    SUBTITLE_MISMATCH: "字幕与视频时长不符，已拒绝",
     CHARGE_BLOCKED: "充电专属视频，无法读取字幕",
     SUBTITLE_EXPIRED: "字幕下载链接已过期",
     VIDEO_NOT_FOUND: "视频不存在或已删除",

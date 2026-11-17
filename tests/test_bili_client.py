@@ -76,40 +76,29 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             await client.get_video_info(bvid="BV1xx411c7mD")
         self.assertEqual(ctx.exception.code, ErrorCode.VIDEO_NOT_FOUND)
 
-    async def test_tracks_fallback_across_endpoints(self) -> None:
+    async def test_tracks_use_signed_endpoint_only(self) -> None:
+        """字幕轨只从签名端点读取；未签名端点会返回别的视频的字幕。"""
+
         def handler(url, params, headers):
             if "/x/web-interface/nav" in url:
                 return NAV
             if "/x/player/wbi/v2" in url:
-                return HttpResponse(200, '{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}')
-            if "/x/player/v2" in url:
                 return api_ok({"subtitle": {"subtitles": [{"lan": "zh-CN", "subtitle_url": "https://s/1.json"}]}})
+            if "/x/player/v2" in url:
+                return api_ok({"subtitle": {"subtitles": [{"lan": "ai-zh", "subtitle_url": "https://s/wrong.json"}]}})
             return api_err(-404)
 
         client, transport = make_client(handler)
         tracks, provider = await client.get_tracks(bvid="BV1xx411c7mD", cid=200, aid=100)
-        self.assertEqual(provider, "player_v2")
-        self.assertEqual(tracks[0].lan, "zh-CN")
+        self.assertEqual(provider, "wbi")
+        self.assertEqual([t.lan for t in tracks], ["zh-CN"])
+        self.assertFalse(any("/x/player/v2" in c["url"] for c in transport.calls))
+        self.assertFalse(any("/x/v2/dm/view" in c["url"] for c in transport.calls))
         wbi_call = next(c for c in transport.calls if "/x/player/wbi/v2" in c["url"])
         self.assertIn("w_rid", wbi_call["params"])
         self.assertIn("wts", wbi_call["params"])
 
-    async def test_tracks_fallback_when_first_endpoint_requires_login(self) -> None:
-        def handler(url, params, headers):
-            if "/x/web-interface/nav" in url:
-                return NAV
-            if "/x/player/wbi/v2" in url:
-                return api_err(-101, "账号未登录")
-            if "/x/player/v2" in url:
-                return api_ok({"subtitle": {"subtitles": [{"lan": "zh-CN", "subtitle_url": "https://s/1.json"}]}})
-            return api_err(-404)
-
-        client, _ = make_client(handler)
-        tracks, provider = await client.get_tracks(bvid="BV1xx411c7mD", cid=200)
-        self.assertEqual(provider, "player_v2")
-        self.assertEqual(tracks[0].lan, "zh-CN")
-
-    async def test_tracks_login_expired_when_all_endpoints_denied(self) -> None:
+    async def test_tracks_login_expired_propagates(self) -> None:
         def handler(url, params, headers):
             if "/x/web-interface/nav" in url:
                 return NAV

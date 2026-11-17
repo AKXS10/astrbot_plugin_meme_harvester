@@ -277,48 +277,34 @@ class BiliClient:
         )
 
     async def get_tracks(self, *, bvid: str, cid: int, aid: int = 0) -> tuple[list[Track], str]:
-        """四级端点兜底：player_wbi → player_v2 → dm_view。返回 (tracks, provider)。"""
-        base = {"bvid": bvid, "cid": cid}
+        """只从**签名端点** player/wbi/v2 读字幕轨。
+
+        实测教训：未签名的 ``/x/player/v2`` 和 ``/x/v2/dm/view`` 对同一个 bvid
+        会返回**别的视频**的 subtitle_url（同一请求连发三次，拿到 0 条 / 某科技
+        评测视频 / 某健身视频三种结果），整条采集链路因此串片、抽取出的"梗"与
+        视频完全无关。字幕是后续所有内容的唯一来源，宁可不采也不能采错。
+        """
+        params: dict[str, Any] = {"bvid": bvid, "cid": cid}
         if aid:
-            base["aid"] = aid
-        attempts = (
-            ("wbi", "/x/player/wbi/v2", True),
-            ("player_v2", "/x/player/v2", False),
-            ("dm", "/x/v2/dm/view", False),
-        )
-        last_error: BiliError | None = None
-        succeeded = False
-        for provider, path, signed in attempts:
-            params = dict(base)
-            if provider == "dm":
-                params = {"oid": cid, "type": 1, "bvid": bvid}
-            try:
-                data = await self._get(path, params, signed=signed)
-            except BiliError as exc:
-                # 风控立即中断；未登录则继续尝试下一个端点（dm_view 有时不需要登录态）
-                if exc.code == ErrorCode.RISK_CONTROL:
-                    raise
-                last_error = exc
-                continue
-            succeeded = True
-            exclusive = bool(data.get("is_upower_exclusive"))
-            playable = bool(data.get("is_upower_play"))
-            if exclusive and not playable:
-                raise BiliError(ErrorCode.CHARGE_BLOCKED)
-            subtitle = data.get("subtitle") or {}
-            raw_tracks = subtitle.get("subtitles") or []
-            tracks = [Track.from_api(item) for item in raw_tracks if isinstance(item, dict)]
-            if tracks:
-                return tracks, provider
-        if last_error is not None and last_error.code == ErrorCode.LOGIN_EXPIRED:
-            raise last_error
-        if not succeeded and last_error is not None:
-            # 所有端点都失败：不要伪装成「没有字幕」，把真实原因带出去
+            params["aid"] = aid
+        try:
+            data = await self._get("/x/player/wbi/v2", params, signed=True)
+        except BiliError as exc:
+            if exc.code in (ErrorCode.RISK_CONTROL, ErrorCode.LOGIN_EXPIRED):
+                raise
             raise BiliError(
                 ErrorCode.NO_SUBTITLE,
-                f"字幕接口均失败（{last_error.code.value}：{last_error}）",
-            )
-        return [], ""
+                f"字幕接口失败（{exc.code.value}：{exc}）",
+            ) from exc
+
+        exclusive = bool(data.get("is_upower_exclusive"))
+        playable = bool(data.get("is_upower_play"))
+        if exclusive and not playable:
+            raise BiliError(ErrorCode.CHARGE_BLOCKED)
+        subtitle = data.get("subtitle") or {}
+        raw_tracks = subtitle.get("subtitles") or []
+        tracks = [Track.from_api(item) for item in raw_tracks if isinstance(item, dict)]
+        return (tracks, "wbi" if tracks else "")
 
     async def resolve_ai_subtitle_url(self, *, aid: int, cid: int) -> str:
         if not aid or not cid:

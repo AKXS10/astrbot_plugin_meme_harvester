@@ -141,6 +141,22 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(again.status, "skipped")
         self.assertEqual(await self.storage.count_memes(), 1)
 
+    async def test_subtitle_timeline_mismatch_rejected(self) -> None:
+        """字幕时间轴远超视频时长时拒绝入库（防止取到别的视频的字幕）。"""
+        self.client.payload = {
+            "body": [
+                {"from": 0.0, "to": 2.0, "content": "这是别的视频的第一句"},
+                {"from": 1400.0, "to": 1500.0, "content": "这是别的视频的结尾"},
+            ]
+        }
+        with self.assertRaises(BiliError) as ctx:
+            await self.pipeline.process_video("BV1xx411c7mD")
+        self.assertEqual(ctx.exception.code, ErrorCode.SUBTITLE_MISMATCH)
+        video = await self.storage.get_video("BV1xx411c7mD")
+        self.assertEqual(video["status"], "failed")
+        self.assertIn("SUBTITLE_MISMATCH", video["last_error"])
+        self.assertEqual(await self.storage.count_memes(), 0)
+
     async def test_no_subtitle_marks_failed(self) -> None:
         self.client.tracks = []
         with self.assertRaises(BiliError) as ctx:
