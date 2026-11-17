@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import uuid
 from dataclasses import dataclass, field
@@ -14,12 +15,13 @@ from .bili.subtitle import (
     parse_subtitle_payload,
     pick_track,
     provider_label,
+    rank_tracks,
     segments_text_hash,
 )
 from .bili.urls import ParsedTarget, parse_target
 from .constants import ErrorCode
 from .extractor import ExtractOutcome, MemeExtractor
-from .models import Segment, VideoInfo
+from .models import Segment, Track, VideoInfo
 from .sources.classify import classify_url
 from .sources.media import MediaResolver
 from .sources.webpage import WebPageResolver
@@ -27,6 +29,13 @@ from .storage import Storage
 from .text import segments_to_plain, split_chunks
 
 ProgressFn = Callable[[str, int], Awaitable[None]]
+
+#: 单条字幕少于这个字数时，认为可能只是片头/广告占位，再看下一轨。
+_MIN_SUBTITLE_CHARS = 200
+
+
+def _text_length(segments: list[Segment]) -> int:
+    return sum(len(segment.text) for segment in segments)
 
 
 def _split_video_key(key: str) -> tuple[str, int]:
@@ -146,24 +155,79 @@ class VideoPipeline:
 
             tracks, endpoint = await self.client.get_tracks(bvid=info.bvid, cid=info.cid, aid=info.aid)
             if not tracks:
-                raise BiliError(ErrorCode.NO_SUBTITLE)
+                # player 接口偶发返回空轨道（登录态抖动/风控前兆），稍等重试一次。
+                await asyncio.sleep(1.2)
+                tracks, endpoint = await self.client.get_tracks(
+                    bvid=info.bvid, cid=info.cid, aid=info.aid
+                )
+            if self._logger is not None:
+                self._logger.debug(
+                    "tracks %s: %s via %s",
+                    info.bvid,
+                    [(t.lan, t.ai_status, bool(t.url)) for t in tracks],
+                    endpoint,
+                )
             track = pick_track(tracks)
-            if track is None:
-                raise BiliError(ErrorCode.NO_SUBTITLE)
-            result.track_lan = track.lan
-
-            url = track.url
             resolved_ai = False
-            if not url and track.is_ai and info.aid:
-                url = await self.client.resolve_ai_subtitle_url(aid=info.aid, cid=info.cid)
-                resolved_ai = bool(url)
-            if not url:
-                raise BiliError(ErrorCode.NO_SUBTITLE, f"轨道 {track.lan} 没有可用字幕地址。")
+            if track is None:
+                # 有些视频的轨道列表为空，但 AI 字幕搜索接口仍能给出地址。
+                ai_url = (
+                    await self.client.resolve_ai_subtitle_url(aid=info.aid, cid=info.cid)
+                    if info.aid
+                    else ""
+                )
+                if ai_url:
+                    track = Track(lan="ai-zh", url=ai_url, ai_status=2, is_ai=True)
+                    endpoint = "ai_stat"
+                    resolved_ai = True
+                else:
+                    raise BiliError(
+                        ErrorCode.NO_SUBTITLE,
+                        "没有取到字幕轨。可能是该视频确实没有字幕，或登录态失效，可重新扫码后再试。",
+                    )
 
-            payload = await self.client.fetch_subtitle(url)
-            segments: list[Segment] = parse_subtitle_payload(payload)
-            if not segments:
+            # CC 轨有时是内嵌广告/仅几秒的占位字幕，内容明显偏少时再试下一轨。
+            candidates = rank_tracks(tracks) if tracks else [track]
+            best: tuple[Track, list[Segment], bool] | None = None
+            for candidate in candidates[:2]:
+                if candidate is not track and not candidate.url and not candidate.is_ai:
+                    continue
+                url = candidate.url
+                resolved = False
+                if not url and candidate.is_ai and info.aid:
+                    url = await self.client.resolve_ai_subtitle_url(aid=info.aid, cid=info.cid)
+                    resolved = bool(url)
+                if not url:
+                    continue
+                try:
+                    payload = await self.client.fetch_subtitle(url)
+                except BiliError as exc:
+                    if self._logger is not None:
+                        self._logger.debug("track %s 下载失败：%s", candidate.lan, exc)
+                    continue
+                if self._logger is not None:
+                    body = payload.get("body") if isinstance(payload, dict) else None
+                    sample = (body or [{}])[0]
+                    self._logger.debug(
+                        "subtitle %s（%s）entries=%s max_to=%s first=%s",
+                        candidate.lan,
+                        url[:70],
+                        len(body or []),
+                        max((float(item.get("to") or 0) for item in body or []), default=0),
+                        {k: sample.get(k) for k in ("from", "to", "content")},
+                    )
+                candidate_segments: list[Segment] = parse_subtitle_payload(payload)
+                if not candidate_segments:
+                    continue
+                if best is None or _text_length(candidate_segments) > _text_length(best[1]):
+                    best = (candidate, candidate_segments, resolved)
+                if _text_length(best[1]) >= _MIN_SUBTITLE_CHARS:
+                    break
+
+            if best is None:
                 raise BiliError(ErrorCode.NO_SUBTITLE, "字幕内容为空。")
+            track, segments, resolved_ai = best
+            result.track_lan = track.lan
             result.segments = len(segments)
             result.provider = provider_label(track, endpoint, resolved_ai=resolved_ai)
 

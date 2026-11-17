@@ -131,9 +131,23 @@ class BiliClient:
             query_params = sign_params(query_params, img_key, sub_key)
         url = host + path
         self.stats["requests"] += 1
-        response: HttpResponse = await self._transport.get(
-            url, params=query_params, headers=self._headers(referer)
-        )
+        response: HttpResponse | None = None
+        for attempt in (1, 2):
+            try:
+                response = await self._transport.get(
+                    url, params=query_params, headers=self._headers(referer)
+                )
+                break
+            except (asyncio.TimeoutError, OSError) as exc:
+                # 插件刚重载 / 网络抖动时首个请求偶发 20s 超时，重试一次再报错。
+                if attempt == 1:
+                    await asyncio.sleep(1.0)
+                    continue
+                raise BiliError(
+                    ErrorCode.INTERNAL,
+                    f"B 站请求超时或网络异常（{type(exc).__name__}）：{path}",
+                ) from exc
+        assert response is not None
         merge_set_cookies(self.cookies, response.set_cookies)
         if response.status == 412:
             self._trip_breaker()
@@ -147,7 +161,13 @@ class BiliClient:
         except ValueError:
             if allow_html:
                 return {}, response
-            raise BiliError(ErrorCode.INTERNAL, "B 站返回了非 JSON 内容") from None
+            content_type = response.headers.get("content-type", "")
+            preview = (response.text or "").strip()[:80].replace("\n", " ")
+            raise BiliError(
+                ErrorCode.INTERNAL,
+                f"B 站返回了非 JSON 内容（{path}，HTTP {response.status}，"
+                f"content-type={content_type}，前 80 字：{preview!r}）",
+            ) from None
         if not isinstance(payload, dict):
             raise BiliError(ErrorCode.INTERNAL, "B 站返回结构异常")
         code = int(payload.get("code") or 0)
@@ -303,7 +323,11 @@ class BiliClient:
     async def resolve_ai_subtitle_url(self, *, aid: int, cid: int) -> str:
         if not aid or not cid:
             return ""
-        data = await self._get("/x/player/v2/ai/subtitle/search/stat", {"aid": aid, "cid": cid})
+        try:
+            data = await self._get("/x/player/v2/ai/subtitle/search/stat", {"aid": aid, "cid": cid})
+        except BiliError:
+            # 该端点对多数视频已 404，拿不到就当作没有，交给上层给「无字幕」提示。
+            return ""
         subtitle = data.get("subtitle") if isinstance(data.get("subtitle"), dict) else {}
         for candidate in (data.get("subtitle_url"), subtitle.get("subtitle_url"), data.get("url")):
             if candidate:
@@ -313,9 +337,22 @@ class BiliClient:
     async def fetch_subtitle(self, url: str) -> dict[str, Any]:
         if self.is_risk_blocked():
             raise BiliError(ErrorCode.RISK_CONTROL)
+        url = str(url or "").strip()
+        if url.startswith("//"):
+            url = "https:" + url
+        if not url.startswith("http"):
+            raise BiliError(ErrorCode.SUBTITLE_EXPIRED, f"字幕地址不合法：{url[:80]}")
         await self._throttle()
         self.stats["requests"] += 1
-        response: HttpResponse = await self._transport.get(url, headers=self._headers())
+        try:
+            response: HttpResponse = await self._transport.get(url, headers=self._headers())
+        except BiliError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise BiliError(
+                ErrorCode.SUBTITLE_EXPIRED,
+                f"字幕下载失败（{exc.__class__.__name__}）：{url[:100]}",
+            ) from exc
         merge_set_cookies(self.cookies, response.set_cookies)
         if response.status in (401, 403, 404):
             raise BiliError(ErrorCode.SUBTITLE_EXPIRED, api_code=response.status)

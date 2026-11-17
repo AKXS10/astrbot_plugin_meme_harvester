@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import traceback
 from typing import Any, Awaitable, Callable
 
 from .bili.client import BiliError
@@ -121,21 +122,27 @@ class TaskQueue:
                     "error", f"task_{kind}", f"{target}: {exc.code.value} {exc}"[:500]
                 )
             except Exception as exc:  # noqa: BLE001
+                detail = str(exc) or exc.__class__.__name__
+                tb = traceback.format_exc()
+                if self._logger is not None:
+                    self._logger.error("task_%s failed: %s\n%s", kind, detail, tb)
                 merged = dict(payload)
                 merged["stage"] = state["stage"] or merged.get("stage", "")
                 merged["result"] = {
                     "status": "failed",
                     "error": "INTERNAL",
-                    "message": str(exc)[:300],
+                    "message": detail[:300],
                 }
                 await self.storage.update_task(
                     task_id,
                     status="failed",
                     progress=100,
-                    last_error=f"INTERNAL: {exc}"[:300],
+                    last_error=f"INTERNAL: {detail}"[:300],
                     payload=merged,
                 )
-                await self.storage.add_log("error", f"task_{kind}", f"{target}: {exc}"[:500])
+                await self.storage.add_log(
+                    "error", f"task_{kind}", f"{target}: {detail}\n{tb}"[:2000]
+                )
             else:
                 merged = dict(payload)
                 merged["result"] = result
