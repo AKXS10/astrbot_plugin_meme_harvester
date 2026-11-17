@@ -128,7 +128,7 @@ class MemeHarvesterPlugin(Star):
         self._settings = merged
         interval = float(merged.request_interval)
         self.client.interval = interval
-        self.client.risk_cooldown = 1800.0
+        self.client.risk_cooldown = float(merged.risk_cooldown)
         return merged
 
     async def terminate(self) -> None:

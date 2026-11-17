@@ -43,6 +43,18 @@
     "hint": "不建议低于 1 秒，风控是常态。",
     "default": 1.0
   },
+  "risk_cooldown": {
+    "type": "float",
+    "description": "触发风控后的熔断时长（秒）",
+    "hint": "默认 1800；熔断期内插件不会向 B 站发请求。",
+    "default": 1800.0
+  },
+  "user_agent": {
+    "type": "string",
+    "description": "自定义 User-Agent",
+    "hint": "留空使用默认浏览器 UA。非必要不要修改。",
+    "default": ""
+  },
   "collection_page_size": {
     "type": "int",
     "description": "合集分页大小",

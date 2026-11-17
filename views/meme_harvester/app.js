@@ -948,6 +948,8 @@
     chunk_chars: { label: "字幕分块字数", type: "int" },
     max_chunks: { label: "单视频最大分块", type: "int" },
     request_interval: { label: "B 站请求间隔（秒）", type: "float" },
+    risk_cooldown: { label: "风控熔断时长（秒）", type: "float", hint: "触发 412 后暂停请求的时间，默认 1800" },
+    user_agent: { label: "自定义 User-Agent", type: "str", hint: "留空使用默认浏览器 UA" },
     collection_page_size: { label: "合集每页条数", type: "int" },
     max_collection_items: { label: "合集单次上限", type: "int" },
     queue_concurrency: { label: "任务并发", type: "int" },
@@ -993,7 +995,7 @@
     },
     {
       title: "B 站采集与队列",
-      keys: ["request_interval", "collection_page_size", "max_collection_items", "queue_concurrency", "raw_retention_days"],
+      keys: ["request_interval", "risk_cooldown", "user_agent", "collection_page_size", "max_collection_items", "queue_concurrency", "raw_retention_days"],
     },
     {
       title: "入库、检索与同步",

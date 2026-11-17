@@ -56,6 +56,7 @@ class Settings:
     chunk_chars: int = 6000
     max_chunks: int = 8
     request_interval: float = 1.0
+    risk_cooldown: float = 1800.0
     collection_page_size: int = 30
     max_collection_items: int = 500
     queue_concurrency: int = 1
@@ -100,6 +101,7 @@ class Settings:
             chunk_chars=_as_int(raw.get("chunk_chars"), 6000, minimum=800, maximum=32000),
             max_chunks=_as_int(raw.get("max_chunks"), 8, minimum=1, maximum=40),
             request_interval=_as_float(raw.get("request_interval"), 1.0, minimum=0.2, maximum=30.0),
+            risk_cooldown=_as_float(raw.get("risk_cooldown"), 1800.0, minimum=60.0, maximum=86400.0),
             collection_page_size=_as_int(raw.get("collection_page_size"), 30, minimum=1, maximum=100),
             max_collection_items=_as_int(raw.get("max_collection_items"), 500, minimum=1, maximum=5000),
             queue_concurrency=_as_int(raw.get("queue_concurrency"), 1, minimum=1, maximum=4),
