@@ -52,13 +52,16 @@ class FakeStorage:
     async def stats(self):
         return {"memes": 3, "videos": 1, "reviews": 0, "slangs": 2, "transcripts": 1, "fts": True}
 
-    async def list_tasks(self, limit=5, status=None):
+    async def list_tasks(self, limit=5, status=None, kind=None):
         return [{"id": "t1", "kind": "video", "status": "done", "progress": 100, "payload": {}}]
 
-    async def list_memes(self, query="", status=None, limit=20, offset=0):
+    async def find_tasks_by_target(self, target, kind=None):
+        return []
+
+    async def list_memes(self, query="", status=None, limit=20, offset=0, source=""):
         return [{"id": 1, "term": "典", "definition": "经典", "status": "published"}]
 
-    async def count_memes(self, status=None):
+    async def count_memes(self, status=None, source=""):
         return 1
 
     async def set_settings(self, changes):
@@ -118,6 +121,14 @@ class FakeQueue:
         return True
 
 
+class FakeTemp:
+    def stats(self):
+        return {"files": 0, "bytes": 0, "path": "", "oldest": ""}
+
+    def cleanup(self, days=3):
+        return 0
+
+
 class FakePlugin:
     def __init__(self) -> None:
         self.storage = FakeStorage()
@@ -125,6 +136,7 @@ class FakePlugin:
         self.memewiki = FakeMemewiki()
         self.llm = FakeLLM()
         self.queue = FakeQueue()
+        self.temp = FakeTemp()
         self.version = "0.1.0"
         self._settings = Settings()
         self.started = 0

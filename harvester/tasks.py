@@ -58,10 +58,24 @@ class TaskQueue:
         self._started = False
 
     async def submit(self, kind: str, target: str, payload: dict[str, Any] | None = None) -> str:
-        """建任务并立即返回 id；实际执行在后台。"""
-        task_id = await self.storage.create_task(kind, target, payload or {})
-        self._spawn(task_id, kind, target, dict(payload or {}))
+        """同一链接只保留一条进度：清掉旧记录后重新排队。"""
+        payload = payload or {}
+        for record in await self.storage.find_tasks_by_target(target, kind=kind):
+            await self.clear(record["id"])
+        task_id = await self.storage.create_task(kind, target, payload)
+        self._spawn(task_id, kind, target, dict(payload))
         return task_id
+
+    async def clear(self, task_id: str) -> bool:
+        """取消（若在跑）并删除任务记录。"""
+        task = self._running.get(task_id)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+        return await self.storage.delete_task(task_id)
 
     def cancel(self, task_id: str) -> bool:
         task = self._running.get(task_id)

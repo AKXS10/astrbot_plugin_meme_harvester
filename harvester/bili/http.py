@@ -102,6 +102,38 @@ class AiohttpTransport:
                 truncated=truncated,
             )
 
+    async def get_bytes(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        max_bytes: int = 200 * 1024 * 1024,
+    ) -> tuple[bytes, HttpResponse]:
+        """下载二进制（音频流等），返回 (bytes, 响应元信息)。"""
+        import asyncio
+
+        session = self._ensure_session()
+        async with session.get(url, headers=headers, allow_redirects=True) as resp:
+            raw_headers = {k.lower(): v for k, v in resp.headers.items()}
+            buffer = bytearray()
+            truncated = False
+            try:
+                async for chunk in resp.content.iter_chunked(256 * 1024):
+                    buffer.extend(chunk)
+                    if len(buffer) >= int(max_bytes):
+                        truncated = True
+                        break
+            except asyncio.CancelledError:
+                raise
+            meta = HttpResponse(
+                status=resp.status,
+                text="",
+                url=str(resp.url),
+                headers=raw_headers,
+                truncated=truncated,
+            )
+            return bytes(buffer), meta
+
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
             await self._session.close()

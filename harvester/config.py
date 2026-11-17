@@ -61,6 +61,7 @@ class Settings:
     max_collection_items: int = 500
     queue_concurrency: int = 1
     raw_retention_days: int = 30
+    temp_retention_days: int = 3
     review_required: bool = True
     memewiki_enabled: bool = True
     memewiki_min_confidence: float = 0.6
@@ -75,6 +76,7 @@ class Settings:
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
     transcribe_language: str = ""
+    asr_deps_path: str = ""
     media_max_duration: int = 5400
     transcribe_timeout: int = 1800
     download_timeout: int = 600
@@ -106,6 +108,7 @@ class Settings:
             max_collection_items=_as_int(raw.get("max_collection_items"), 500, minimum=1, maximum=5000),
             queue_concurrency=_as_int(raw.get("queue_concurrency"), 1, minimum=1, maximum=4),
             raw_retention_days=_as_int(raw.get("raw_retention_days"), 30, minimum=0, maximum=3650),
+            temp_retention_days=_as_int(raw.get("temp_retention_days"), 3, minimum=1, maximum=90),
             review_required=_as_bool(raw.get("review_required"), True),
             memewiki_enabled=_as_bool(raw.get("memewiki_enabled"), True),
             memewiki_min_confidence=_as_float(raw.get("memewiki_min_confidence"), 0.6, minimum=0.0, maximum=1.0),
@@ -123,6 +126,7 @@ class Settings:
                 "int8",
             ),
             transcribe_language=str(raw.get("transcribe_language") or "").strip(),
+            asr_deps_path=str(raw.get("asr_deps_path") or "").strip(),
             media_max_duration=_as_int(
                 raw.get("media_max_duration"), 5400, minimum=30, maximum=43_200
             ),

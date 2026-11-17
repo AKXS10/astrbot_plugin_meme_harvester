@@ -198,6 +198,22 @@
       });
       head.appendChild(cancel);
     }
+    if (!opts.compact) {
+      const clearBtn = el("button", "btn tiny ghost", "清除");
+      clearBtn.title = "删除这条任务记录；同一链接再次解析时会自动清除旧记录并重新排队";
+      clearBtn.addEventListener("click", async () => {
+        if (!window.confirm("清除这条任务记录？")) return;
+        try {
+          await call("POST", "task/clear", { id: task.id });
+          toast("已清除任务记录", "ok");
+          refreshVisibleTasks();
+          refreshStats();
+        } catch (err) {
+          /* toast 已提示 */
+        }
+      });
+      head.appendChild(clearBtn);
+    }
     wrap.appendChild(head);
 
     const progress = Math.max(0, Math.min(100, Number(task.progress) || 0));
@@ -434,6 +450,7 @@
       renderMemewiki(data.memewiki || {});
       renderProviders(data.providers || [], data.settings || {});
       renderRecent(data.tasks || []);
+      renderTemp(data.temp || {});
       renderWarnings(data.settings_warnings || []);
     } catch (err) {
       if (!cards.childElementCount) {
@@ -636,7 +653,7 @@
         page,
         force: $("parse-force").checked,
       });
-      toast("已加入队列：" + (data.target || url), "ok");
+      toast("已加入队列：" + (data.target || url) + (data.replaced ? "（已清除同一链接的旧进度）" : ""), "ok");
       if (currentTab !== "parse") switchTab("parse");
       await refreshVisibleTasks();
       ensureTaskPolling();
@@ -666,7 +683,7 @@
     btn.disabled = true;
     try {
       const data = await call("POST", "collection", { url, force: $("col-force").checked });
-      toast("合集已加入队列：" + (data.target || url), "ok");
+      toast("合集已加入队列：" + (data.target || url) + (data.replaced ? "（已清除同一链接的旧进度）" : ""), "ok");
       if (currentTab !== "collection") switchTab("collection");
       await refreshVisibleTasks();
       ensureTaskPolling();
@@ -698,10 +715,12 @@
     }
     const query = $("meme-query").value.trim();
     const status = $("meme-status").value;
+    const source = $("meme-source") ? $("meme-source").value : "";
     try {
       const data = await call("GET", "memes", {
         query,
         status,
+        source,
         limit: MEME_PAGE,
         offset: memeOffset,
       });
@@ -722,11 +741,42 @@
     }
   }
 
+  async function loadSourceOptions() {
+    const select = $("meme-source");
+    if (!select) return;
+    try {
+      const data = await call("GET", "sources", { limit: 200 });
+      const current = select.value;
+      select.innerHTML = '<option value="">全部来源</option>';
+      (data || []).forEach((item) => {
+        const option = el("option", "", (item.source_label || item.url || "?") + "（" + (item.memes || 0) + "）");
+        option.value = item.source_label || "";
+        select.appendChild(option);
+      });
+      if (current) select.value = current;
+    } catch (err) {
+      /* 下拉加载失败不阻塞主列表 */
+    }
+  }
+
+  function renderTemp(temp) {
+    const box = $("temp-box");
+    if (!box) return;
+    const info = temp || {};
+    const bytes = Number(info.bytes || 0);
+    if (!info.files) {
+      box.textContent = "字幕临时文件：暂无";
+      return;
+    }
+    const size = bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(bytes / 1024)) + " KB";
+    box.textContent = "字幕临时文件：" + info.files + " 个 · " + size + " · 最旧 " + (info.oldest || "-");
+  }
+
   function renderMemes() {
     const table = $("meme-table");
     table.className = "";
     table.innerHTML =
-      "<thead><tr><th>词条</th><th>释义</th><th>热度</th><th>置信</th><th>状态</th><th>同步</th><th></th></tr></thead>";
+      "<thead><tr><th>词条</th><th>释义</th><th>来源</th><th>热度</th><th>置信</th><th>状态</th><th>同步</th><th></th></tr></thead>";
     const body = el("tbody");
     memeItems.forEach((meme, index) => {
       const tr = el("tr");
@@ -734,6 +784,9 @@
       const def = el("td", "def", meme.definition || "");
       def.title = meme.definition || "";
       tr.appendChild(def);
+      const src = el("td", "small", meme.source_label || "—");
+      src.title = meme.origin || "";
+      tr.appendChild(src);
       tr.appendChild(el("td", "", String(meme.heat || 0)));
       tr.appendChild(el("td", "", (Number(meme.confidence || 0) * 100).toFixed(0) + "%"));
       const statusTd = el("td");
@@ -810,7 +863,21 @@
   });
   $("meme-status").addEventListener("change", () => loadMemes(true));
   $("btn-meme-more").addEventListener("click", () => loadMemes(false));
-  loaders.memes = () => loadMemes(true);
+  loaders.memes = async () => {
+    loadSourceOptions();
+    await loadMemes(true);
+  };
+
+  $("meme-source").addEventListener("change", () => loadMemes(true));
+  $("btn-temp-clean").addEventListener("click", async () => {
+    try {
+      const data = await call("POST", "temp/clean", {});
+      toast("已清理 " + (data.removed || 0) + " 个过期文件（保留 " + (data.days || 3) + " 天）", "ok");
+      renderTemp(data);
+    } catch (err) {
+      /* toast 已提示 */
+    }
+  });
 
   /* ---------------------------------------------------------------- 审核 */
 
@@ -955,6 +1022,7 @@
     max_collection_items: { label: "合集单次上限", type: "int" },
     queue_concurrency: { label: "任务并发", type: "int" },
     raw_retention_days: { label: "原始字幕保留天数", type: "int" },
+    temp_retention_days: { label: "字幕临时文件保留天数", type: "int", hint: "默认 3 天，到期自动清理" },
     review_required: { label: "新词条进审核", type: "bool" },
     memewiki_enabled: { label: "同步到梗百科", type: "bool" },
     memewiki_min_confidence: { label: "同步最低置信度", type: "float" },
@@ -967,6 +1035,7 @@
     whisper_device: { label: "Whisper 设备", type: "str", hint: "cpu / cuda / auto" },
     whisper_compute_type: { label: "Whisper 计算精度", type: "str", hint: "int8 / float16 / float32" },
     transcribe_language: { label: "转写语言", type: "str", hint: "留空自动识别，如 zh / en" },
+    asr_deps_path: { label: "faster-whisper 依赖目录", type: "str", hint: "可选：pip install --target 到此目录，避免改动 AstrBot 自带 Python" },
     media_max_duration: { label: "视频时长上限（秒）", type: "int" },
     transcribe_timeout: { label: "转写超时（秒）", type: "int" },
     download_timeout: { label: "音视频下载超时（秒）", type: "int" },
@@ -988,7 +1057,7 @@
     },
     {
       title: "多平台视频与本地转写",
-      keys: ["media_enabled", "transcribe_enabled", "whisper_model", "whisper_device", "whisper_compute_type", "transcribe_language", "media_max_duration", "transcribe_timeout", "download_timeout", "ytdlp_cookies_file", "ytdlp_proxy", "keep_temp_files"],
+      keys: ["media_enabled", "transcribe_enabled", "whisper_model", "whisper_device", "whisper_compute_type", "transcribe_language", "asr_deps_path", "media_max_duration", "transcribe_timeout", "download_timeout", "ytdlp_cookies_file", "ytdlp_proxy", "keep_temp_files"],
     },
     {
       title: "网页抓取",
@@ -996,7 +1065,7 @@
     },
     {
       title: "B 站采集与队列",
-      keys: ["request_interval", "risk_cooldown", "user_agent", "collection_page_size", "max_collection_items", "queue_concurrency", "raw_retention_days"],
+      keys: ["request_interval", "risk_cooldown", "user_agent", "collection_page_size", "max_collection_items", "queue_concurrency", "raw_retention_days", "temp_retention_days"],
     },
     {
       title: "入库、检索与同步",

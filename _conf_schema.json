@@ -77,6 +77,12 @@
     "hint": "超期后清空字幕正文，只保留出处与哈希。",
     "default": 30
   },
+  "temp_retention_days": {
+    "type": "int",
+    "description": "字幕临时文件保留天数",
+    "hint": "解析出的字幕文本会存一份到插件 temp 目录，超期自动清理；默认 3 天。",
+    "default": 3
+  },
   "review_required": {
     "type": "bool",
     "description": "新词条先进入审核队列",
@@ -203,5 +209,11 @@
     "type": "int",
     "description": "单篇内容送入抽取的最大字符数",
     "default": 60000
+  },
+  "asr_deps_path": {
+    "description": "faster-whisper 依赖目录（可选）",
+    "hint": "若不想改动 AstrBot 自带 Python，可用 pip install --target <目录> faster-whisper 安装到独立目录，再填这里",
+    "type": "string",
+    "default": ""
   }
 }

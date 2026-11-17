@@ -276,6 +276,40 @@ class BiliClient:
             ],
         )
 
+    async def get_audio_stream(self, *, bvid: str, cid: int, aid: int = 0) -> tuple[str, int]:
+        """取视频音频流地址（DASH 最佳音轨，退回 durl）。返回 (url, 时长秒)。"""
+        params: dict[str, Any] = {"bvid": bvid, "cid": cid, "fnval": 16, "fnver": 0, "fourk": 1}
+        if aid:
+            params["aid"] = aid
+        data = await self._get("/x/player/wbi/playurl", params, signed=True)
+        dash = data.get("dash") or {}
+        audios = [
+            item for item in (dash.get("audio") or [])
+            if isinstance(item, dict) and item.get("baseUrl")
+        ]
+        if audios:
+            best = max(audios, key=lambda item: int(item.get("bandwidth") or 0))
+            return str(best["baseUrl"]), int(data.get("timelength") or 0) // 1000
+        for item in data.get("durl") or []:
+            if isinstance(item, dict) and item.get("url"):
+                return str(item["url"]), int(data.get("timelength") or 0) // 1000
+        raise BiliError(ErrorCode.NO_SUBTITLE, "该视频取不到音频流，无法本地转写")
+
+    async def download(self, url: str, *, max_bytes: int = 200 * 1024 * 1024) -> bytes:
+        """下载二进制内容（音频），带 B 站 Referer，必要时补全协议。"""
+        if url.startswith("//"):
+            url = "https:" + url
+        if not url.startswith("http"):
+            raise BiliError(ErrorCode.DOWNLOAD_FAILED, f"音频地址不合法：{url[:100]}")
+        headers = self._headers("https://www.bilibili.com")
+        headers.pop("Accept", None)
+        raw, meta = await self._transport.get_bytes(url, headers=headers, max_bytes=max_bytes)
+        if meta.status >= 400 or not raw:
+            raise BiliError(
+                ErrorCode.DOWNLOAD_FAILED, f"音频下载失败：HTTP {meta.status}（{url[:100]}）"
+            )
+        return raw
+
     async def get_tracks(self, *, bvid: str, cid: int, aid: int = 0) -> tuple[list[Track], str]:
         """只从**签名端点** player/wbi/v2 读字幕轨。
 

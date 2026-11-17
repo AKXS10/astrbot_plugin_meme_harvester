@@ -8,13 +8,17 @@
 
 ## 功能
 
-- **单条解析**：粘贴 B 站视频链接 / BV 号，自动抓取 CC 字幕或 AI 字幕，交给 LLM 结构化抽取梗。
+- **单条解析**：粘贴 B 站视频链接 / BV 号，自动抓取 CC 字幕或 AI 字幕；没有字幕且已安装 `faster-whisper` 时下载音频本地转写，交给 LLM 结构化抽取梗。
 - **多平台视频**：YouTube、抖音、TikTok、X、Vimeo、优酷、腾讯视频等交给 yt-dlp；优先平台字幕，没有字幕且已安装
   `faster-whisper` 时下载音频在本地转写（临时文件在任务结束后清理，可配置保留）。
 - **网页抓取**：萌娘百科 / 维基百科走 MediaWiki API，其它站点提取正文；正文转成无时间轴分段后走同一套抽取流程。
 - **合集批量解析**：B 站合集（season）、系列（series）链接自动分页、串行入库，带限速与风控熔断；支持新式
   `space.bilibili.com/<mid>/lists/<id>?type=season` 链接。
 - **字幕优先级**：中文 CC 字幕 → 中文 AI 字幕 → AI 字幕搜索接口，逐级兜底（全部来自签名播放接口）；CC 轨只有片头/广告等极少内容时自动改选信息更全的 AI 轨；字幕时间轴与视频时长明显不符时整条拒绝，避免串片。
+- **字幕兜底**：B 站 CC/AI 字幕都取不到、或字幕时间轴与视频明显不符时，自动下载音频走本地转写，避免「没有字幕就失败」。
+- **来源分类**：词条库按来源归类——B 站显示 BV 号，其它站点显示「作者｜标题」，可按来源筛选。
+- **任务管理**：任务列表可清除任意记录；同一链接再次提交时先清除旧进度再重新排队，不会堆叠重复任务。
+- **字幕存档**：解析出的字幕文本保存在插件 `temp/` 目录，默认保留 3 天，可配置由后台定时清理。
 - **只增不改**：同名词条不覆盖，释义冲突进「审核队列」人工裁决；重复别名与标签自动并集。
 - **反幻觉**：每条梗必须能在来源文本里逐字定位到引用句，定位失败的候选直接丢弃。
 - **群黑话**：按 `group:<群号>` / `private:<QQ号>` 作用域维护自定义黑话，优先于公共梗库命中。
@@ -36,8 +40,17 @@
 ```bash
 # 可选：开启多平台 / 本地转写
 pip install yt-dlp
-pip install faster-whisper
+pip install faster-whisper "av<16"
 ```
+
+> `av>=16` 与 faster-whisper 1.2.x 不兼容（`metadata_errors` 参数被移除），务必锁 `av<16`。
+> 如果不方便改动 AstrBot 自带的 Python，可以装到独立目录并填进设置项 `asr_deps_path`：
+>
+> ```bash
+> pip install --target <插件数据目录>/asr_deps faster-whisper "av<16"
+> ```
+>
+> 插件会在导入 `faster_whisper` 前把该目录加入 `sys.path`。
 
 未安装可选依赖时，B 站与网页解析不受影响；相关任务会以 `MEDIA_UNSUPPORTED` / `ASR_UNAVAILABLE` 明确提示。
 
@@ -86,6 +99,7 @@ git clone https://github.com/<your-name>/astrbot_plugin_meme_harvester.git
      │    → 取视频信息（/x/web-interface/view）
      │    → 取字幕轨（只用签名端点 player/wbi/v2，按 CC > AI 排序，并校验时间轴与视频时长）
      │    → 下载字幕（CDN auth_key 分钟级过期，取到即下）
+     │    └（无字幕 / 时间轴异常）下载音频 → faster-whisper 本地转写 → 临时目录清理
      ├─ 其它平台：yt-dlp 探测字幕 →（有）下载并解析 VTT/SRT
      │    └（无）下载音频 → faster-whisper 本地转写 → 临时目录清理
      └─ 网页：MediaWiki API / HTML 正文提取 → 切成无时间轴分段
@@ -118,6 +132,7 @@ git clone https://github.com/<your-name>/astrbot_plugin_meme_harvester.git
 | `collection_page_size` / `max_collection_items` | `30` / `500` | 合集翻页与单次上限 |
 | `queue_concurrency` | `1` | 后台任务并发（1–4） |
 | `raw_retention_days` | `30` | 原始字幕保留天数，到期清空正文 |
+| `temp_retention_days` | `3` | 字幕临时文件保留天数（1–90），后台每 6 小时清理一次 |
 | `review_required` | `true` | 新词条先入草稿/审核 |
 | `memewiki_enabled` / `memewiki_min_confidence` | `true` / `0.6` | 同步开关与最低置信度 |
 | `inject_enabled` / `inject_max_chars` | `true` / `600` | 聊天注入开关与预算 |
@@ -126,6 +141,7 @@ git clone https://github.com/<your-name>/astrbot_plugin_meme_harvester.git
 | `transcribe_enabled` | `true` | 无字幕时是否本地 Whisper 转写（需 faster-whisper） |
 | `whisper_model` / `whisper_device` / `whisper_compute_type` | `small` / `cpu` / `int8` | 转写模型与推理设备；CPU 建议 tiny/base/small |
 | `transcribe_language` | `""` | 转写语言，空 = 自动识别 |
+| `asr_deps_path` | `""` | faster-whisper 的独立安装目录（`pip install --target`），留空用当前 Python |
 | `media_max_duration` | `5400` | 单条视频时长上限（秒），超出直接拒绝 |
 | `transcribe_timeout` / `download_timeout` | `1800` / `600` | 转写与音视频下载超时（秒） |
 | `ytdlp_cookies_file` / `ytdlp_proxy` | `""` | yt-dlp 的 Cookie 文件（Netscape 格式）与代理 |

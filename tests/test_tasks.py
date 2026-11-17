@@ -95,7 +95,11 @@ class TaskQueueTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_running_task(self) -> None:
         self.pipeline.delay = 1.0
         task_id = await self.queue.submit("video", "BV1xx411c7mD")
-        await asyncio.sleep(0.1)
+        for _ in range(40):
+            current = await self.storage.get_task(task_id)
+            if current and current["status"] == "running":
+                break
+            await asyncio.sleep(0.05)
         self.assertTrue(self.queue.cancel(task_id))
         snapshot = await self.queue.wait(task_id, timeout=2)
         self.assertEqual(snapshot["status"], "cancelled")

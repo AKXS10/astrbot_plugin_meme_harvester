@@ -29,6 +29,7 @@ from .harvester.sources.media import MediaResolver
 from .harvester.sources.webpage import WebPageResolver
 from .harvester.storage import Storage
 from .harvester.tasks import TaskQueue
+from .harvester.tempstore import TempStore
 
 try:  # 4.9.2+ 提供 StarTools
     from astrbot.core.star.star_tools import StarTools
@@ -72,6 +73,7 @@ class MemeHarvesterPlugin(Star):
             AiohttpTransport(), self._get_settings, transcriber=self.transcriber, logger=logger
         )
         self.web = WebPageResolver(AiohttpTransport(), self._get_settings, logger=logger)
+        self.temp = TempStore(self.data_dir / "temp", logger=logger)
         self.pipeline = VideoPipeline(
             self.client,
             self.storage,
@@ -81,6 +83,8 @@ class MemeHarvesterPlugin(Star):
             media_resolver=self.media,
             web_resolver=self.web,
             tmp_root=self.data_dir / "tmp",
+            asr=self.transcriber,
+            temp_store=self.temp,
         )
         self.queue = TaskQueue(
             self.storage,
@@ -119,6 +123,8 @@ class MemeHarvesterPlugin(Star):
             await self.reload_settings()
             await self.auth.restore()
             await self.queue.start()
+            await self._cleanup_temp()
+            self._temp_task = asyncio.create_task(self._temp_loop())
             self._ready = True
             logger.info("[meme_harvester] 初始化完成，数据目录 %s", self.data_dir)
 
@@ -133,12 +139,39 @@ class MemeHarvesterPlugin(Star):
 
     async def terminate(self) -> None:
         try:
+            task = getattr(self, "_temp_task", None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
             if self._ready:
                 await self.queue.shutdown()
                 await self.client.close()
                 await self.storage.close()
         except Exception:  # noqa: BLE001
             logger.exception("[meme_harvester] 关闭时出错")
+
+    # ------------------------------------------------------------ 临时文件
+
+    async def _cleanup_temp(self) -> int:
+        days = int(getattr(self._settings, "temp_retention_days", 3) or 3)
+        try:
+            return await asyncio.to_thread(self.temp.cleanup, days)
+        except Exception:  # noqa: BLE001
+            logger.exception("[meme_harvester] 清理字幕临时文件失败")
+            return 0
+
+    async def _temp_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(6 * 3600)
+                await self._cleanup_temp()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception("[meme_harvester] temp 定时清理异常")
 
     # ------------------------------------------------------------ 业务封装
 

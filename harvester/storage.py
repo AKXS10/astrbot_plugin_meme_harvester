@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS videos (
     is_charge_blocked INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     last_error TEXT NOT NULL DEFAULT '',
+    source_label TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (platform, video_id)
@@ -242,12 +244,22 @@ class Storage:
         finally:
             conn.close()
 
+    @staticmethod
+    def _migrate_sync(conn: sqlite3.Connection) -> None:
+        """轻量迁移：只加列，不改旧数据。"""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
+        if "source_label" not in columns:
+            conn.execute("ALTER TABLE videos ADD COLUMN source_label TEXT NOT NULL DEFAULT ''")
+        if "url" not in columns:
+            conn.execute("ALTER TABLE videos ADD COLUMN url TEXT NOT NULL DEFAULT ''")
+
     def _init_sync(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.executescript(SCHEMA_SQL)
+            self._migrate_sync(conn)
             try:
                 conn.executescript(FTS_SQL)
                 self._fts = True
@@ -372,18 +384,41 @@ class Storage:
 
     # ---------------------------------------------------------------- 视频
 
+    @staticmethod
+    def _source_label(info: VideoInfo) -> str:
+        """词条库的来源分类：B 站用 BV 号，其它站点用「作者 + 标题」。"""
+        platform = (info.platform or "bilibili").lower()
+        if platform == "bilibili":
+            return (info.bvid or info.video_key).strip()[:64]
+        owner = clean_text(info.owner_name).strip()
+        title = clean_text(info.title).strip()
+        if owner and title:
+            return f"{owner}｜{title}"[:120]
+        return (title or owner or info.video_key)[:120]
+
+    @staticmethod
+    def _video_url(info: VideoInfo) -> str:
+        if info.url:
+            return str(info.url)[:500]
+        if (info.platform or "bilibili").lower() == "bilibili" and info.bvid:
+            base = f"https://www.bilibili.com/video/{info.bvid}"
+            if info.page_no > 1:
+                base += f"?p={info.page_no}"
+            return base
+        return ""
+
     def _upsert_video_sync(self, info: VideoInfo, status: str = "pending") -> int:
         now = utcnow()
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO videos(platform, video_id, bvid, aid, cid, title, owner_name, owner_mid, pubdate, duration, "
-                "season_id, page_no, is_charge_blocked, status, created_at, updated_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "season_id, page_no, is_charge_blocked, status, source_label, url, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(platform, video_id) DO UPDATE SET "
                 "aid=excluded.aid, cid=excluded.cid, title=excluded.title, owner_name=excluded.owner_name, "
                 "owner_mid=excluded.owner_mid, pubdate=excluded.pubdate, duration=excluded.duration, "
                 "season_id=excluded.season_id, page_no=excluded.page_no, is_charge_blocked=excluded.is_charge_blocked, "
-                "updated_at=excluded.updated_at",
+                "source_label=excluded.source_label, url=excluded.url, updated_at=excluded.updated_at",
                 (
                     info.platform or "bilibili",
                     info.video_key,
@@ -399,6 +434,8 @@ class Storage:
                     info.page_no,
                     1 if info.is_charge_blocked else 0,
                     status,
+                    self._source_label(info),
+                    self._video_url(info),
                     now,
                     now,
                 ),
@@ -638,6 +675,7 @@ class Storage:
         query: str = "",
         status: str | None = None,
         sync_state: str | None = None,
+        source: str = "",
         limit: int = 20,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -661,6 +699,9 @@ class Storage:
             if sync_state:
                 where.append("sync_state=?")
                 params.append(sync_state)
+            if source.strip():
+                where.append("origin IN (SELECT url FROM videos WHERE source_label = ?)")
+                params.append(source.strip())
             if where:
                 sql += " WHERE " + " AND ".join(where)
             sql += " ORDER BY heat DESC, updated_at DESC LIMIT ? OFFSET ?"
@@ -676,17 +717,40 @@ class Storage:
                         "ORDER BY heat DESC, updated_at DESC LIMIT ? OFFSET ?",
                         (like, like, like, int(limit), int(offset)),
                     ).fetchall()
-            return [dict(r) for r in rows]
+                return self._attach_source_labels(conn, rows)
 
         return await self._read(run)
 
-    async def count_memes(self, status: str | None = None) -> int:
+    @staticmethod
+    def _attach_source_labels(conn: sqlite3.Connection, rows) -> list[dict[str, Any]]:
+        items = [dict(r) for r in rows]
+        origins = {item.get("origin") for item in items if item.get("origin")}
+        if not origins:
+            return items
+        marks = ",".join("?" for _ in origins)
+        labels = {
+            row["url"]: row["source_label"]
+            for row in conn.execute(
+                f"SELECT url, source_label FROM videos WHERE url IN ({marks})", tuple(origins)
+            )
+        }
+        for item in items:
+            item["source_label"] = labels.get(item.get("origin") or "", "")
+        return items
+
+    async def count_memes(self, status: str | None = None, source: str = "") -> int:
         def run() -> int:
             sql = "SELECT COUNT(*) AS c FROM memes"
+            where: list[str] = []
             params: list[Any] = []
             if status:
-                sql += " WHERE status=?"
+                where.append("status=?")
                 params.append(status)
+            if source.strip():
+                where.append("origin IN (SELECT url FROM videos WHERE source_label = ?)")
+                params.append(source.strip())
+            if where:
+                sql += " WHERE " + " AND ".join(where)
             with self._conn() as conn:
                 return int(conn.execute(sql, params).fetchone()["c"])
 
@@ -900,6 +964,46 @@ class Storage:
             with self._conn() as conn:
                 row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             return _decode_task(dict(row)) if row else None
+
+        return await self._read(run)
+
+    async def find_tasks_by_target(self, target: str, kind: str | None = None) -> list[dict[str, Any]]:
+        def run() -> list[dict[str, Any]]:
+            sql = "SELECT * FROM tasks WHERE target=?"
+            params: list[Any] = [target[:500]]
+            if kind:
+                sql += " AND kind=?"
+                params.append(kind)
+            sql += " ORDER BY created_at DESC"
+            with self._conn() as conn:
+                rows = conn.execute(sql, params).fetchall()
+            return [_decode_task(dict(r)) for r in rows]
+
+        return await self._read(run)
+
+    async def delete_task(self, task_id: str) -> bool:
+        def run() -> bool:
+            with self._conn() as conn:
+                cursor = conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+                return cursor.rowcount > 0
+
+        return await self._write(run)
+
+    async def list_sources(self, limit: int = 100) -> list[dict[str, Any]]:
+        """按「来源分类」聚合：B 站为 BV 号，其它站点为作者｜标题。"""
+
+        def run() -> list[dict[str, Any]]:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    "SELECT v.platform, v.video_id, v.source_label, v.title, v.owner_name, v.url,"
+                    "       COUNT(m.id) AS memes, MAX(v.updated_at) AS updated_at"
+                    "  FROM videos v LEFT JOIN memes m ON m.origin = v.url"
+                    " WHERE v.source_label <> ''"
+                    " GROUP BY v.id"
+                    " ORDER BY updated_at DESC LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
+            return [dict(r) for r in rows]
 
         return await self._read(run)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -119,6 +120,8 @@ class VideoPipeline:
         media_resolver: MediaResolver | None = None,
         web_resolver: WebPageResolver | None = None,
         tmp_root: Path | str | None = None,
+        asr: Any = None,
+        temp_store: Any = None,
     ) -> None:
         self.client = client
         self.storage = storage
@@ -129,6 +132,8 @@ class VideoPipeline:
         self.media = media_resolver
         self.web = web_resolver
         self.tmp_root = Path(tmp_root) if tmp_root else None
+        self.asr = asr
+        self.temp = temp_store
 
     async def _progress(self, fn: ProgressFn | None, stage: str, pct: int) -> None:
         if fn is not None:
@@ -198,15 +203,10 @@ class VideoPipeline:
                     track = Track(lan="ai-zh", url=ai_url, ai_status=2, is_ai=True)
                     endpoint = "ai_stat"
                     resolved_ai = True
-                else:
-                    raise BiliError(
-                        ErrorCode.NO_SUBTITLE,
-                        "没有取到字幕轨。可能是该视频确实没有字幕，或登录态失效，可重新扫码后再试。",
-                    )
 
             # CC 轨有时是内嵌广告/仅几秒的占位字幕，内容明显偏少时再试下一轨。
-            candidates = rank_tracks(tracks) if tracks else [track]
             best: tuple[Track, list[Segment], bool] | None = None
+            candidates = rank_tracks(tracks) if tracks else ([track] if track is not None else [])
             for candidate in candidates[:2]:
                 if candidate is not track and not candidate.url and not candidate.is_ai:
                     continue
@@ -242,21 +242,45 @@ class VideoPipeline:
                 if _text_length(best[1]) >= _MIN_SUBTITLE_CHARS:
                     break
 
-            if best is None:
-                raise BiliError(ErrorCode.NO_SUBTITLE, "字幕内容为空。")
-            track, segments, resolved_ai = best
-            _assert_timeline(info.duration, segments, source=track.lan)
-            result.track_lan = track.lan
+            if best is not None:
+                picked, segments, resolved_ai = best
+                try:
+                    _assert_timeline(info.duration, segments, source=picked.lan)
+                except BiliError as exc:
+                    # 时间轴对不上通常意味着拿到的是别的视频的字幕，转写更可靠。
+                    if self._logger is not None:
+                        self._logger.warning("字幕时间轴异常，改走本地转写：%s", exc)
+                    result.notes.append("字幕时间轴异常，已改用本地音频转写")
+                    segments, provider, lang = await self._bili_asr(info, progress)
+                else:
+                    provider = provider_label(picked, endpoint, resolved_ai=resolved_ai)
+                    lang = picked.lan
+            else:
+                # 没有可用字幕轨：走本地音频转写，保证「有声音就能出词条」。
+                segments, provider, lang = await self._bili_asr(info, progress)
+                result.notes.append("未取到 B 站字幕，已用本地音频转写（whisper）")
+
+            result.track_lan = lang
             result.segments = len(segments)
-            result.provider = provider_label(track, endpoint, resolved_ai=resolved_ai)
+            result.provider = provider
 
             text_hash = segments_text_hash(segments)
             await self.storage.add_transcript(
-                video_db_id, track.lan, result.provider, segments, text_hash
+                video_db_id, lang, result.provider, segments, text_hash
             )
             stored = await self.storage.get_transcript(video_db_id)
             if stored:
                 result.transcript_id = int(stored.get("id") or 0)
+            if self.temp is not None:
+                try:
+                    self.temp.save(
+                        result.video_key or "unknown",
+                        title=result.title,
+                        provider=result.provider,
+                        text=segments_to_plain(segments),
+                    )
+                except OSError:
+                    pass
 
             await self._progress(progress, "extracting", 45)
             chunks = split_chunks(
@@ -334,6 +358,46 @@ class VideoPipeline:
             except Exception:
                 pass
         return result
+
+    async def _bili_asr(
+        self, info: VideoInfo, progress: ProgressFn | None = None
+    ) -> tuple[list[Segment], str, str]:
+        """B 站无字幕兜底：取音频流 → 下载到临时目录 → 本地 Whisper 转写。"""
+        settings = self._settings()
+        if not getattr(settings, "transcribe_enabled", False):
+            raise BiliError(ErrorCode.NO_SUBTITLE, "该视频没有字幕，且本地转写未开启。")
+        if self.asr is None:
+            raise BiliError(
+                ErrorCode.ASR_UNAVAILABLE,
+                "该视频没有字幕，本地转写不可用（请安装 faster-whisper）。",
+            )
+        await self._progress(progress, "transcribing", 30)
+        if self.tmp_root is not None:
+            job_dir = self._job_dir()
+            cleanup = not settings.keep_temp_files
+        else:
+            job_dir = Path(tempfile.mkdtemp(prefix="mh-asr-"))
+            cleanup = True
+        try:
+            url, _ = await self.client.get_audio_stream(
+                bvid=info.bvid, cid=info.cid, aid=info.aid
+            )
+            raw = await self.client.download(url)
+            audio = job_dir / "audio.m4a"
+            audio.write_bytes(raw)
+            if self._logger is not None:
+                self._logger.info("B 站无字幕，音频已下载 %s（%s bytes）", info.bvid, len(raw))
+            segments, lang = await self.asr.transcribe(
+                audio,
+                language=getattr(settings, "transcribe_language", "") or "",
+                progress=None,
+            )
+            if not segments:
+                raise BiliError(ErrorCode.TRANSCRIBE_FAILED, "转写结果为空。")
+            return list(segments), "whisper", lang or "zh"
+        finally:
+            if cleanup:
+                shutil.rmtree(job_dir, ignore_errors=True)
 
     async def process_collection(
         self,
@@ -530,6 +594,16 @@ class VideoPipeline:
             stored = await self.storage.get_transcript(video_db_id)
             if stored:
                 result.transcript_id = int(stored.get("id") or 0)
+            if self.temp is not None:
+                try:
+                    self.temp.save(
+                        result.video_key or "unknown",
+                        title=result.title,
+                        provider=result.provider,
+                        text=segments_to_plain(segments),
+                    )
+                except OSError:
+                    pass
 
             await self._progress(progress, "extracting", 45)
             chunks = split_chunks(

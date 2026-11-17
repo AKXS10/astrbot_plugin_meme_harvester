@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 from typing import Any, Callable
 
 from ..bili.client import BiliError
 from ..constants import ErrorCode
 from ..models import Segment
+
+_EXTRA_PATH_DONE: set[str] = set()
 
 
 class Transcriber:
@@ -55,7 +59,10 @@ class Transcriber:
         except BiliError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise BiliError(ErrorCode.TRANSCRIBE_FAILED, f"转写失败：{exc}") from exc
+            hint = ""
+            if "metadata_errors" in str(exc):
+                hint = "（av 版本不兼容，请 pip install \"av<16\"）"
+            raise BiliError(ErrorCode.TRANSCRIBE_FAILED, f"转写失败{hint}：{exc}") from exc
         segments: list[Segment] = []
         for start, end, text in raw:
             text = (text or "").strip()
@@ -71,12 +78,19 @@ class Transcriber:
         return segments, (lang or "").strip()
 
     def _load_model(self) -> Any:
+        extra = str(self._opt("asr_deps_path", "") or "").strip()
+        if extra:
+            path = str(Path(extra).expanduser())
+            if path not in _EXTRA_PATH_DONE and Path(path).is_dir():
+                _EXTRA_PATH_DONE.add(path)
+                sys.path.insert(0, path)
         try:
             from faster_whisper import WhisperModel  # type: ignore[import-not-found]
         except Exception as exc:  # noqa: BLE001
             raise BiliError(
                 ErrorCode.ASR_UNAVAILABLE,
-                "未安装 faster-whisper，无法本地转写；可 pip install faster-whisper",
+                "未安装 faster-whisper，无法本地转写；可 pip install faster-whisper "
+                "或在设置里填写 asr_deps_path 指向已安装的目录",
             ) from exc
 
         name = str(self._opt("whisper_model", "small") or "small")

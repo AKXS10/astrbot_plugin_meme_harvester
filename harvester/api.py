@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 from dataclasses import asdict, fields
 from typing import Any, Callable
@@ -21,6 +22,10 @@ _BOOL_KEYS = {
     "memewiki_enabled",
     "auto_parse_on_link",
     "inject_enabled",
+    "media_enabled",
+    "transcribe_enabled",
+    "keep_temp_files",
+    "web_enabled",
 }
 _INT_KEYS = {
     "max_tokens",
@@ -31,9 +36,17 @@ _INT_KEYS = {
     "max_collection_items",
     "queue_concurrency",
     "raw_retention_days",
+    "temp_retention_days",
     "inject_max_chars",
+    "media_max_duration",
+    "transcribe_timeout",
+    "download_timeout",
+    "web_timeout",
+    "web_max_bytes",
+    "web_min_chars",
+    "max_source_chars",
 }
-_FLOAT_KEYS = {"temperature", "request_interval", "memewiki_min_confidence"}
+_FLOAT_KEYS = {"temperature", "request_interval", "memewiki_min_confidence", "risk_cooldown"}
 
 
 def _ok(data: Any = None, **extra: Any) -> Any:
@@ -114,6 +127,10 @@ class WebApi:
             ("/tasks", self.tasks, ["GET"], "任务列表"),
             ("/task", self.task, ["GET"], "任务详情"),
             ("/task/cancel", self.task_cancel, ["POST"], "取消任务"),
+            ("/task/clear", self.task_clear, ["POST"], "清除任务记录（运行中会先取消）"),
+            ("/sources", self.sources, ["GET"], "词条来源分类（B 站 BV 号 / 作者｜标题）"),
+            ("/temp/stats", self.temp_stats, ["GET"], "字幕临时文件占用"),
+            ("/temp/clean", self.temp_clean, ["POST"], "立即清理过期字幕临时文件"),
             ("/memes", self.memes, ["GET"], "词条列表"),
             ("/meme/update", self.meme_update, ["POST"], "更新词条"),
             ("/meme/delete", self.meme_delete, ["POST"], "删除词条"),
@@ -152,6 +169,7 @@ class WebApi:
                 "settings_warnings": p.settings().validate(),
                 "tasks": tasks,
                 "version": p.version,
+                "temp": p.temp.stats(),
             }
         )
 
@@ -199,6 +217,7 @@ class WebApi:
         if route.kind != "bilibili":
             if route.kind == "unsupported":
                 return _fail(ErrorCode.BAD_URL.value, route.reason or "无法识别的链接")
+            existing = await self.plugin.storage.find_tasks_by_target(route.url, kind="url")
             task_id = await self.plugin.queue.submit(
                 "url",
                 route.url,
@@ -209,7 +228,14 @@ class WebApi:
                     "platform": route.platform,
                 },
             )
-            return _ok({"task_id": task_id, "target": route.url, "kind": route.kind})
+            return _ok(
+                {
+                    "task_id": task_id,
+                    "target": route.url,
+                    "kind": route.kind,
+                    "replaced": bool(existing),
+                }
+            )
         target = parse_target(raw)
         if target.kind == "short":
             final = await self.plugin.client.resolve_short_link(raw)
@@ -225,10 +251,18 @@ class WebApi:
             return _fail(ErrorCode.BAD_URL.value, "暂不支持该链接类型")
         page = _to_int(body.get("page") or target.page, 1, 1, 9999)
         video_key = target.bvid or f"av{target.aid}"
+        existing = await self.plugin.storage.find_tasks_by_target(video_key, kind="video")
         task_id = await self.plugin.queue.submit(
             "video", video_key, {"page": page, "force": force}
         )
-        return _ok({"task_id": task_id, "target": video_key, "kind": "video"})
+        return _ok(
+            {
+                "task_id": task_id,
+                "target": video_key,
+                "kind": "video",
+                "replaced": bool(existing),
+            }
+        )
 
     @_api
     async def collection(self):
@@ -249,8 +283,16 @@ class WebApi:
             "force": bool(body.get("force")),
         }
         name = f"season:{target.season_id}" if target.season_id else f"series:{target.series_id}"
+        existing = await self.plugin.storage.find_tasks_by_target(name, kind="collection")
         task_id = await self.plugin.queue.submit("collection", name, payload)
-        return _ok({"task_id": task_id, "target": name, "kind": "collection"})
+        return _ok(
+            {
+                "task_id": task_id,
+                "target": name,
+                "kind": "collection",
+                "replaced": bool(existing),
+            }
+        )
 
     @_api
     async def tasks(self):
@@ -270,6 +312,32 @@ class WebApi:
         return _ok(record)
 
     @_api
+    async def task_clear(self):
+        body = await _body()
+        task_id = str(body.get("id") or "")
+        if not task_id:
+            return _fail("BAD_REQUEST", "缺少任务 id")
+        cleared = await self.plugin.queue.clear(task_id)
+        if not cleared:
+            return _fail("NOT_FOUND", "任务不存在或已清除", 404)
+        return _ok({"cleared": True})
+
+    @_api
+    async def sources(self):
+        limit = _to_int(request.query.get("limit", 100), 100, 1, 500)
+        return _ok(await self.plugin.storage.list_sources(limit=limit))
+
+    @_api
+    async def temp_stats(self):
+        return _ok(self.plugin.temp.stats())
+
+    @_api
+    async def temp_clean(self):
+        days = int(getattr(self.plugin.settings(), "temp_retention_days", 3) or 3)
+        removed = await asyncio.to_thread(self.plugin.temp.cleanup, days)
+        return _ok({"removed": removed, "days": days, **self.plugin.temp.stats()})
+
+    @_api
     async def task_cancel(self):
         body = await _body()
         task_id = str(body.get("id") or "")
@@ -286,12 +354,13 @@ class WebApi:
     async def memes(self):
         query = str(request.query.get("query", "") or "")
         status = request.query.get("status") or None
+        source = str(request.query.get("source", "") or "").strip()
         limit = _to_int(request.query.get("limit", 20), 20, 1, 200)
         offset = _to_int(request.query.get("offset", 0), 0, 0, 1_000_000)
         items = await self.plugin.storage.list_memes(
-            query=query, status=status, limit=limit, offset=offset
+            query=query, status=status, source=source, limit=limit, offset=offset
         )
-        total = await self.plugin.storage.count_memes(status=status)
+        total = await self.plugin.storage.count_memes(status=status, source=source)
         return _ok({"items": items, "total": total, "limit": limit, "offset": offset})
 
     @_api

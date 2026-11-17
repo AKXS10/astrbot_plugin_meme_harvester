@@ -12,7 +12,7 @@ from harvester.bili.urls import ParsedTarget
 from harvester.config import Settings
 from harvester.constants import ErrorCode
 from harvester.extractor import MemeExtractor
-from harvester.models import Track, VideoInfo
+from harvester.models import Segment, Track, VideoInfo
 from harvester.pipeline import VideoPipeline
 from harvester.storage import Storage
 
@@ -88,8 +88,27 @@ class FakeBiliClient:
             raise self.fail_with
         return self.payload
 
+    async def get_audio_stream(self, *, bvid: str, cid: int, aid: int = 0):
+        self.calls.append("audio_stream")
+        return "https://upos.example/audio.m4a", 600
+
+    async def download(self, url: str, *, max_bytes: int = 0) -> bytes:
+        self.calls.append("download")
+        return b"fake-audio"
+
     async def get_season_archives(self, *, mid, season_id, page_num=1, page_size=30):
         return [self.info], 1
+
+
+class FakeASR:
+    """返回固定转写片段，模拟 faster-whisper。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def transcribe(self, audio_path, *, language: str = "", progress=None):
+        self.calls.append(str(audio_path))
+        return [Segment(index=0, start_ms=0, end_ms=3000, text="这是本地转写出来的内容，讲的是尊嘟假嘟")], "zh"
 
 
 def make_extractor(response: str = LLM_JSON) -> MemeExtractor:
@@ -141,26 +160,66 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(again.status, "skipped")
         self.assertEqual(await self.storage.count_memes(), 1)
 
-    async def test_subtitle_timeline_mismatch_rejected(self) -> None:
-        """字幕时间轴远超视频时长时拒绝入库（防止取到别的视频的字幕）。"""
+    async def test_subtitle_timeline_mismatch_falls_back_to_asr(self) -> None:
+        """字幕时间轴远超视频时长时改走本地转写，而不是把别人的字幕入库。"""
         self.client.payload = {
             "body": [
                 {"from": 0.0, "to": 2.0, "content": "这是别的视频的第一句"},
                 {"from": 1400.0, "to": 1500.0, "content": "这是别的视频的结尾"},
             ]
         }
+        pipeline = VideoPipeline(
+            self.client,
+            self.storage,
+            make_extractor(),
+            lambda: self.settings,
+            asr=FakeASR(),
+        )
+        result = await pipeline.process_video("BV1xx411c7mD")
+        self.assertEqual(result.status, "done")
+        self.assertEqual(result.provider, "whisper")
+        self.assertIn("audio_stream", self.client.calls)
+        self.assertEqual(await self.storage.count_memes(), 1)
+
+    async def test_timeline_mismatch_without_asr_fails(self) -> None:
+        self.client.payload = {
+            "body": [{"from": 1400.0, "to": 1500.0, "content": "别的视频"}]
+        }
         with self.assertRaises(BiliError) as ctx:
             await self.pipeline.process_video("BV1xx411c7mD")
-        self.assertEqual(ctx.exception.code, ErrorCode.SUBTITLE_MISMATCH)
+        self.assertEqual(ctx.exception.code, ErrorCode.ASR_UNAVAILABLE)
         video = await self.storage.get_video("BV1xx411c7mD")
         self.assertEqual(video["status"], "failed")
-        self.assertIn("SUBTITLE_MISMATCH", video["last_error"])
         self.assertEqual(await self.storage.count_memes(), 0)
+
+    async def test_no_subtitle_falls_back_to_local_asr(self) -> None:
+        self.client.tracks = []
+        pipeline = VideoPipeline(
+            self.client,
+            self.storage,
+            make_extractor(),
+            lambda: self.settings,
+            asr=FakeASR(),
+        )
+        result = await pipeline.process_video("BV1xx411c7mD")
+        self.assertEqual(result.status, "done")
+        self.assertEqual(result.provider, "whisper")
+        self.assertEqual(result.segments, 1)
+        self.assertTrue(any("本地音频转写" in note for note in result.notes))
+        video = await self.storage.get_video("BV1xx411c7mD")
+        transcript = await self.storage.get_transcript(video["id"])
+        self.assertEqual(transcript["provider"], "whisper")
 
     async def test_no_subtitle_marks_failed(self) -> None:
         self.client.tracks = []
+        pipeline = VideoPipeline(
+            self.client,
+            self.storage,
+            make_extractor(),
+            lambda: Settings(transcribe_enabled=False),
+        )
         with self.assertRaises(BiliError) as ctx:
-            await self.pipeline.process_video("BV1xx411c7mD")
+            await pipeline.process_video("BV1xx411c7mD")
         self.assertEqual(ctx.exception.code, ErrorCode.NO_SUBTITLE)
         video = await self.storage.get_video("BV1xx411c7mD")
         self.assertEqual(video["status"], "failed")
