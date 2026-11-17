@@ -3,7 +3,8 @@
   "use strict";
 
   const B = window.AstrBotPluginPage || window.AstrBotPluginView || null;
-  let readyPromise = B ? B.ready() : Promise.resolve({});
+  const readyPromise = B ? B.ready() : Promise.resolve({});
+  let pageContext = {};
 
   const $ = (id) => document.getElementById(id);
   const el = (tag, cls, text) => {
@@ -19,14 +20,76 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
 
+  /* ------------------------------------------------------------ 文案映射 */
+
+  const KIND_LABELS = { video: "视频", url: "链接", collection: "合集", sync: "同步" };
+  const STATUS_LABELS = {
+    queued: "排队中",
+    running: "解析中",
+    done: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+    skipped: "已跳过",
+  };
+  const STAGE_LABELS = {
+    resolving: "解析链接",
+    probing: "探测平台字幕",
+    fetching_subtitle: "获取字幕",
+    fetching_page: "抓取网页",
+    extracting: "抽取词条",
+    storing: "写入数据库",
+    done: "完成",
+  };
+  const ERROR_LABELS = {
+    LOGIN_REQUIRED: "需要先在「概览」扫码登录 B 站",
+    LOGIN_EXPIRED: "B 站登录已失效，请重新扫码登录",
+    RISK_CONTROL: "触发 B 站风控，已暂停请求 30 分钟",
+    NO_SUBTITLE: "没有可用字幕",
+    CHARGE_BLOCKED: "充电专属视频，无法读取字幕",
+    SUBTITLE_EXPIRED: "字幕下载链接已过期",
+    VIDEO_NOT_FOUND: "视频不存在或已删除",
+    DOWNLOAD_FAILED: "音视频下载失败",
+    MEDIA_UNSUPPORTED: "该平台或链接不受支持",
+    ASR_UNAVAILABLE: "未安装 faster-whisper，无法本地转写",
+    TRANSCRIBE_FAILED: "本地转写失败",
+    WEB_FETCH_FAILED: "网页抓取失败",
+    WEB_CONTENT_EMPTY: "网页正文过少，无法总结",
+    BAD_URL: "链接无法识别",
+    LLM_FAILED: "模型调用失败",
+    LLM_JSON_INVALID: "模型返回内容格式异常",
+    PROVIDER_NOT_CONFIGURED: "未配置可用的对话模型",
+    MEMEWIKI_UNAVAILABLE: "梗百科插件不可用",
+    COLLECTION_EMPTY: "合集为空或没有可解析条目",
+    NOT_CANCELLED: "任务已结束，无法取消",
+    NOT_FOUND: "记录不存在",
+    BAD_REQUEST: "请求参数有误",
+    INTERNAL: "内部错误",
+  };
+
+  const errorText = (code) => ERROR_LABELS[code] || code || "未知错误";
+  const statusText = (status) => STATUS_LABELS[status] || status || "";
+  const kindText = (kind) => KIND_LABELS[kind] || kind || "";
+  const stageText = (stage) => {
+    if (!stage) return "";
+    if (stage.indexOf("collection ") === 0) return "合集进度 " + stage.slice(11);
+    return STAGE_LABELS[stage] || stage;
+  };
+
+  /* ------------------------------------------------------------ 提示与请求 */
+
   function toast(message, kind) {
     const box = $("toast");
+    if (!box || !message) return;
+    box.hidden = false;
     box.textContent = message;
     box.className = "toast show " + (kind || "");
     clearTimeout(toast._timer);
     toast._timer = setTimeout(() => {
       box.className = "toast";
-    }, 3200);
+      setTimeout(() => {
+        box.hidden = true;
+      }, 260);
+    }, kind === "error" ? 5000 : 3200);
   }
 
   async function call(method, endpoint, payload) {
@@ -36,12 +99,13 @@
     try {
       res = method === "GET" ? await B.apiGet(endpoint, payload) : await B.apiPost(endpoint, payload);
     } catch (err) {
-      toast(err.message || "请求失败", "error");
+      const text = (err && (err.message || err.error)) || "网络请求失败";
+      toast(text, "error");
       throw err;
     }
     const body = res && typeof res === "object" && "ok" in res ? res : { ok: true, data: res };
     if (!body.ok) {
-      const message = body.message || body.error || "请求失败";
+      const message = body.message || errorText(body.error);
       toast(message, "error");
       const error = new Error(message);
       error.code = body.error;
@@ -52,30 +116,204 @@
 
   const fmtTime = (value) => {
     if (!value) return "-";
-    const text = String(value).replace("T", " ");
-    return text.slice(0, 19);
+    return String(value).replace("T", " ").slice(0, 19);
   };
+
+  function loading(box) {
+    if (!box) return;
+    box.className = "skeleton";
+    box.textContent = "加载中…";
+  }
+
+  function emptyState(box, title, hint) {
+    if (!box) return;
+    box.className = "empty";
+    box.innerHTML = "";
+    box.appendChild(el("div", "empty-title", title));
+    if (hint) box.appendChild(el("div", "empty-hint", hint));
+  }
+
+  function errorState(box, title, hint) {
+    if (!box) return;
+    box.className = "banner error";
+    box.textContent = title + (hint ? "（" + hint + "）" : "");
+  }
 
   /* ---------------------------------------------------------------- 标签页 */
 
   const loaders = {};
   let currentTab = "overview";
+  const tabsEl = $("tabs");
 
-  function switchTab(tab) {
-    document.querySelectorAll(".tab").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.tab === tab);
+  function switchTab(tab, focus) {
+    currentTab = tab;
+    tabsEl.querySelectorAll(".tab").forEach((btn) => {
+      const on = btn.dataset.tab === tab;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+      btn.tabIndex = on ? 0 : -1;
+      if (on && focus) btn.focus();
     });
     document.querySelectorAll(".panel").forEach((panel) => {
       panel.classList.toggle("active", panel.id === "panel-" + tab);
     });
-    currentTab = tab;
     if (loaders[tab]) loaders[tab]();
   }
 
-  document.getElementById("tabs").addEventListener("click", (event) => {
+  tabsEl.addEventListener("click", (event) => {
     const btn = event.target.closest(".tab");
     if (btn) switchTab(btn.dataset.tab);
   });
+  tabsEl.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const tabs = Array.from(tabsEl.querySelectorAll(".tab"));
+    const index = tabs.findIndex((btn) => btn.classList.contains("active"));
+    const next = tabs[(index + (event.key === "ArrowDown" ? 1 : tabs.length - 1)) % tabs.length];
+    if (next) {
+      event.preventDefault();
+      switchTab(next.dataset.tab, true);
+    }
+  });
+
+  /* ---------------------------------------------------------------- 任务卡 */
+
+  function taskRow(task, options) {
+    const opts = options || {};
+    const wrap = el("div", "task" + (task.status === "failed" ? " failed" : ""));
+    const head = el("div", "task-head");
+    head.appendChild(el("span", "task-kind", kindText(task.kind)));
+    head.appendChild(el("span", "task-target", task.target || ""));
+    head.appendChild(el("span", "task-status " + (task.status || ""), statusText(task.status)));
+    if (!opts.compact && (task.status === "queued" || task.status === "running")) {
+      const cancel = el("button", "btn tiny", "取消");
+      cancel.addEventListener("click", async () => {
+        try {
+          await call("POST", "task/cancel", { id: task.id });
+          toast("已请求取消", "ok");
+          refreshVisibleTasks();
+        } catch (err) {
+          /* toast 已提示 */
+        }
+      });
+      head.appendChild(cancel);
+    }
+    wrap.appendChild(head);
+
+    const progress = Math.max(0, Math.min(100, Number(task.progress) || 0));
+    const bar = el("div", "bar");
+    const fill = el("div", "bar-fill" + (task.status === "failed" ? " bad" : ""));
+    fill.style.width = progress + "%";
+    bar.appendChild(fill);
+    wrap.appendChild(bar);
+
+    const stage = (task.payload && task.payload.stage) || "";
+    const meta = el("div", "task-meta");
+    const parts = [progress + "%"];
+    if (stage) parts.push(stageText(stage));
+    if (task.last_error && task.last_error !== "用户取消") parts.push(errorText(task.last_error));
+    meta.textContent = parts.join(" · ");
+    wrap.appendChild(meta);
+
+    if (!opts.compact) {
+      const result = task.payload && task.payload.result;
+      if (result && result.aborted) {
+        wrap.appendChild(el("div", "banner error", "已中止：" + errorText(result.aborted)));
+      }
+      if (result) {
+        const details = el("details", "task-detail");
+        details.appendChild(el("summary", "", "查看结果"));
+        details.appendChild(renderResult(result));
+        wrap.appendChild(details);
+      } else if (task.status === "failed") {
+        wrap.appendChild(el("div", "banner error", errorText(task.last_error)));
+      }
+    }
+    return wrap;
+  }
+
+  function renderResult(result) {
+    const box = el("div", "result");
+    if (!result || typeof result !== "object") {
+      box.textContent = String(result || "");
+      return box;
+    }
+    if (result.error || result.status === "failed") {
+      box.appendChild(el("div", "result-err", "失败：" + errorText(result.error)));
+      if (result.message) box.appendChild(el("div", "muted small", result.message));
+      return box;
+    }
+    const lines = [];
+    if (result.title) lines.push("《" + result.title + "》");
+    if (result.platform && result.platform !== "bilibili") lines.push("来源：" + result.platform);
+    if (result.status) lines.push("状态：" + statusText(result.status));
+    if (result.track_lan || result.provider) {
+      lines.push("字幕轨：" + (result.track_lan || "-") + " / " + (result.provider || "-"));
+    }
+    if (result.memes_total !== undefined) {
+      lines.push(
+        "抽取 " + result.memes_total + " 条 · 新增 " + (result.memes_created || 0) +
+        " · 冲突 " + (result.conflicts || 0) + " · 待审 " + (result.reviews || 0)
+      );
+    }
+    if (result.total !== undefined) {
+      lines.push(
+        "共 " + result.total + " 条 · 成功 " + (result.done || 0) + " · 失败 " +
+        (result.failed || 0) + " · 跳过 " + (result.skipped || 0)
+      );
+      if (result.aborted) lines.push("已中止：" + errorText(result.aborted));
+    }
+    (result.notes || []).forEach((note) => lines.push("· " + note));
+    box.textContent = lines.join("\n");
+    return box;
+  }
+
+  async function loadTaskList(boxId, kinds) {
+    const box = $(boxId);
+    try {
+      const tasks = await call("GET", "tasks", { limit: 30, kind: "" });
+      const items = (tasks || []).filter((task) => !kinds || kinds.includes(task.kind));
+      if (!items.length) {
+        emptyState(
+          box,
+          "还没有任务",
+          kinds && kinds.includes("collection")
+            ? "在上方填入合集链接后点「加入队列」"
+            : "在上方输入视频/网页链接后点「开始解析」"
+        );
+        return false;
+      }
+      box.className = "task-list";
+      box.innerHTML = "";
+      items.forEach((task) => box.appendChild(taskRow(task, {})));
+      return items.some((task) => task.status === "queued" || task.status === "running");
+    } catch (err) {
+      errorState(box, "任务列表加载失败", err.message || "");
+      return false;
+    }
+  }
+
+  const TASK_VIEWS = {
+    parse: { box: "task-list", kinds: ["video", "url"] },
+    collection: { box: "col-task-list", kinds: ["collection"] },
+  };
+
+  let taskTimer = null;
+  function refreshVisibleTasks() {
+    const view = TASK_VIEWS[currentTab];
+    return view ? loadTaskList(view.box, view.kinds) : Promise.resolve(false);
+  }
+
+  function ensureTaskPolling() {
+    if (taskTimer) return;
+    taskTimer = setInterval(async () => {
+      if (document.hidden) return;
+      const active = await refreshVisibleTasks();
+      if (!active && !["parse", "collection"].includes(currentTab)) {
+        clearInterval(taskTimer);
+        taskTimer = null;
+      }
+    }, 2000);
+  }
 
   /* ---------------------------------------------------------------- 概览 */
 
@@ -87,68 +325,103 @@
     return card;
   }
 
-  function taskRow(task, compact) {
-    const wrap = el("div", "task");
-    const head = el("div", "task-head");
-    head.appendChild(el("span", "task-kind", task.kind === "collection" ? "合集" : task.kind === "sync" ? "同步" : "视频"));
-    head.appendChild(el("span", "task-target", task.target || ""));
-    head.appendChild(el("span", "task-status " + (task.status || ""), task.status || ""));
-    wrap.appendChild(head);
+  function renderAuth(auth) {
+    const dot = $("auth-dot");
+    const state = auth.status || "unknown";
+    const logged = !!auth.logged_in;
+    dot.className = "dot " + (logged ? "on" : state === "unknown" ? "pending" : "off");
+    $("auth-text").textContent = logged
+      ? auth.uname || String(auth.mid || "") || "已登录"
+      : state === "unknown"
+        ? "正在校验登录态…"
+        : state === "expired"
+          ? "登录已失效"
+          : "未登录 B 站";
 
-    const progress = Math.max(0, Math.min(100, Number(task.progress) || 0));
-    const bar = el("div", "bar");
-    const fill = el("div", "bar-fill");
-    fill.style.width = progress + "%";
-    bar.appendChild(fill);
-    wrap.appendChild(bar);
-
-    const stage = (task.payload && task.payload.stage) || "";
-    const meta = el("div", "task-meta");
-    meta.textContent = progress + "%" + (stage ? " · " + stage : "") + (task.last_error ? " · " + task.last_error : "");
-    wrap.appendChild(meta);
-
-    if (!compact && task.payload && task.payload.result) {
-      wrap.appendChild(renderResult(task.payload.result));
+    const desc = $("auth-desc");
+    if (logged) {
+      desc.textContent =
+        "已登录：" + (auth.uname || "") + (auth.mid ? "（" + auth.mid + "）" : "") +
+        "，字幕与合集接口会带登录态。" +
+        (auth.last_ok_at ? " 最近校验 " + fmtTime(auth.last_ok_at) : "");
+    } else if (state === "expired") {
+      desc.textContent = "登录态已失效（Cookie 过期或被踢下线），请重新扫码登录。";
+    } else if (state === "unknown") {
+      desc.textContent = "已恢复本地 Cookie，正在向 B 站确认登录态…";
+    } else {
+      desc.textContent = "未登录。扫码登录后才能读取 CC/AI 字幕（AI 字幕必须登录）。";
     }
-    return wrap;
+    if (auth.masked) $("cookie-input").placeholder = auth.masked;
   }
 
-  function renderResult(result) {
-    const box = el("div", "result");
-    if (!result || typeof result !== "object") {
-      box.textContent = String(result || "");
-      return box;
+  function renderMemewiki(info) {
+    const box = $("memewiki-box");
+    const mode = info.mode || "unavailable";
+    const labels = {
+      inprocess: "已连接「梗百科」（进程内写入，新增词条自动重建索引）",
+      export: "未连接「梗百科」，可导出 JSONL 手动导入",
+      unavailable: "未检测到「梗百科」插件",
+    };
+    box.className = "muted";
+    box.textContent =
+      (labels[mode] || mode) + (info.pending !== undefined ? " · 待同步 " + info.pending + " 条" : "");
+  }
+
+  function renderProviders(providers, settings) {
+    const box = $("provider-box");
+    box.innerHTML = "";
+    if (!providers.length) {
+      box.className = "banner warn";
+      box.textContent = "AstrBot 尚未配置可用的对话模型，请先到「服务提供商」添加后再解析。";
+      return;
     }
-    if (result.error && !result.memes_total) {
-      box.appendChild(el("div", "result-err", "失败：" + result.error));
-      return box;
-    }
-    const lines = [];
-    if (result.title) lines.push("《" + result.title + "》");
-    if (result.status) lines.push("状态：" + result.status);
-    if (result.track_lan || result.provider) lines.push("字幕：" + (result.track_lan || "-") + " / " + (result.provider || "-"));
-    if (result.memes_total !== undefined) {
-      lines.push(
-        "抽取 " + result.memes_total + " 条 · 新增 " + (result.memes_created || 0) +
-        " · 冲突 " + (result.conflicts || 0) + " · 待审 " + (result.reviews || 0)
+    box.className = "";
+    const list = el("div", "chips");
+    providers.forEach((p) => {
+      const chip = el(
+        "span",
+        "chip" + (settings.provider_id === p.id ? " active" : ""),
+        (p.model || p.id) + (p.type ? " · " + p.type : "")
       );
+      list.appendChild(chip);
+    });
+    box.appendChild(list);
+    if (!settings.provider_id) {
+      box.appendChild(el("div", "muted small", "当前跟随 AstrBot 默认模型；可在设置页指定固定 Provider。"));
     }
-    if (result.total !== undefined) {
-      lines.push("共 " + result.total + " 条 · 成功 " + (result.done || 0) + " · 失败 " + (result.failed || 0) + " · 跳过 " + (result.skipped || 0));
+  }
+
+  function renderRecent(tasks) {
+    const box = $("recent-tasks");
+    box.innerHTML = "";
+    const items = (tasks || []).slice(0, 8);
+    if (!items.length) {
+      emptyState(box, "还没有任务", "到「单条解析」粘贴链接开始");
+      return;
     }
-    (result.notes || []).forEach((note) => lines.push("· " + note));
-    box.textContent = lines.join("\n");
-    return box;
+    box.className = "";
+    items.forEach((task) => box.appendChild(taskRow(task, { compact: true })));
+  }
+
+  function renderWarnings(warnings) {
+    const text = warnings && warnings.length ? "配置提醒：" + warnings.join("；") : "";
+    ["ov-warn", "settings-warn"].forEach((id) => {
+      const box = $(id);
+      if (!box) return;
+      box.hidden = !text;
+      box.textContent = text;
+    });
   }
 
   loaders.overview = async function () {
+    const cards = $("stat-cards");
+    if (!cards.childElementCount) cards.appendChild(el("div", "muted small", "加载中…"));
     try {
       const data = await call("GET", "status", {});
       const stats = data.stats || {};
-      const cards = $("stat-cards");
       cards.innerHTML = "";
       cards.appendChild(statCard("词条", stats.memes || 0, "published + draft"));
-      cards.appendChild(statCard("视频", stats.videos || 0));
+      cards.appendChild(statCard("视频/网页", stats.videos || 0));
       cards.appendChild(statCard("待审核", stats.reviews || 0, "冲突与低置信"));
       cards.appendChild(statCard("群黑话", stats.slangs || 0));
       cards.appendChild(statCard("字幕", stats.transcripts || 0, stats.fts ? "FTS5 已启用" : "LIKE 降级"));
@@ -162,140 +435,142 @@
       renderRecent(data.tasks || []);
       renderWarnings(data.settings_warnings || []);
     } catch (err) {
-      /* toast 已提示 */
+      if (!cards.childElementCount) {
+        cards.appendChild(el("div", "banner error", "概览加载失败：" + (err.message || "")));
+      }
     }
   };
 
-  function renderAuth(auth) {
-    const dot = $("auth-dot");
-    const logged = !!auth.logged_in;
-    dot.className = "dot " + (logged ? "on" : "off");
-    $("auth-text").textContent = logged
-      ? (auth.uname || auth.mid || "已登录")
-      : auth.status === "expired" ? "登录已失效" : "未登录 B 站";
-    const desc = $("auth-desc");
-    if (logged) {
-      desc.textContent = "已登录：" + (auth.uname || "") + (auth.mid ? "（" + auth.mid + "）" : "") + "，字幕与合集接口将带登录态。";
-    } else if (auth.status === "expired") {
-      desc.textContent = "登录态已失效（Cookie 过期或被踢），请重新扫码登录。";
-    } else {
-      desc.textContent = "未登录。扫码登录后即可解析需要登录态的字幕（AI 字幕必须登录）。";
+  $("btn-sync").addEventListener("click", async () => {
+    const btn = $("btn-sync");
+    btn.disabled = true;
+    try {
+      const data = await call("POST", "memewiki/sync", { limit: 200 });
+      const pieces = [];
+      if (data.synced) pieces.push("新增 " + data.synced);
+      if (data.existed) pieces.push("已存在 " + data.existed);
+      if (data.skipped) pieces.push("跳过 " + data.skipped);
+      toast(pieces.length ? "同步完成：" + pieces.join("，") : "没有需要同步的词条", "ok");
+      loaders.overview();
+    } catch (err) {
+      /* toast 已提示 */
+    } finally {
+      btn.disabled = false;
     }
-    if (auth.masked) $("cookie-input").placeholder = auth.masked;
-  }
+  });
 
-  function renderMemewiki(info) {
-    const box = $("memewiki-box");
-    const mode = info.mode || "unavailable";
-    const labels = {
-      inprocess: "已连接「梗百科」（进程内写入）",
-      export: "未连接「梗百科」，可导出 JSONL 手动导入",
-      unavailable: "未检测到「梗百科」插件",
-    };
-    box.textContent = (labels[mode] || mode) + (info.pending !== undefined ? " · 待同步 " + info.pending + " 条" : "");
-  }
-
-  function renderProviders(providers, settings) {
-    const box = $("provider-box");
-    box.innerHTML = "";
-    if (!providers.length) {
-      box.textContent = "AstrBot 尚未配置可用的对话模型，请先在「服务提供商」中添加。";
-      return;
+  $("btn-export").addEventListener("click", async () => {
+    try {
+      if (B && typeof B.download === "function") {
+        await B.download("memewiki/export", { limit: 500 }, "memewiki.jsonl");
+        toast("开始下载 JSONL", "ok");
+      } else {
+        toast("当前 AstrBot 版本不支持页面内下载，请直接访问插件接口", "error");
+      }
+    } catch (err) {
+      toast((err && err.message) || "导出失败", "error");
     }
-    const list = el("div", "chips");
-    providers.forEach((p) => {
-      const chip = el("span", "chip" + (settings.provider_id === p.id ? " active" : ""), (p.model || p.id) + (p.type ? " · " + p.type : ""));
-      list.appendChild(chip);
-    });
-    box.appendChild(list);
-    if (!settings.provider_id) {
-      box.appendChild(el("div", "muted small", "当前跟随 AstrBot 默认模型；可在设置页指定固定 Provider。"));
-    }
-  }
-
-  function renderRecent(tasks) {
-    const box = $("recent-tasks");
-    box.innerHTML = "";
-    if (!tasks.length) {
-      box.textContent = "暂无任务";
-      return;
-    }
-    tasks.forEach((task) => box.appendChild(taskRow(task, true)));
-  }
-
-  function renderWarnings(warnings) {
-    const box = $("settings-warn");
-    if (!warnings || !warnings.length) {
-      box.hidden = true;
-      return;
-    }
-    box.hidden = false;
-    box.textContent = "配置提醒：" + warnings.join("；");
-  }
+  });
 
   /* ---------------------------------------------------------------- 登录 */
 
-  let qrTimer = null;
+  const qr = { timer: null, ticker: null, key: "", deadline: 0, fails: 0 };
 
-  function stopQr() {
-    if (qrTimer) {
-      clearInterval(qrTimer);
-      qrTimer = null;
+  function clearQrBox() {
+    $("qr-box").innerHTML = "";
+    $("qr-link").innerHTML = "";
+    $("qr-count").textContent = "";
+  }
+
+  function stopQr(message, kind) {
+    if (qr.timer) clearInterval(qr.timer);
+    if (qr.ticker) clearInterval(qr.ticker);
+    qr.timer = null;
+    qr.ticker = null;
+    if (message) toast(message, kind || "");
+  }
+
+  function updateCountdown() {
+    const left = Math.max(0, Math.ceil((qr.deadline - Date.now()) / 1000));
+    $("qr-count").textContent = left > 0 ? "剩余 " + left + " 秒" : "";
+    if (left <= 0 && qr.timer) {
+      stopQr("二维码已过期，请重新获取", "error");
+      $("qr-hint").textContent = "二维码已过期";
+      clearQrBox();
     }
   }
 
   $("btn-qr").addEventListener("click", async () => {
     stopQr();
+    qr.fails = 0;
+    $("qr-wrap").hidden = false;
+    $("qr-hint").textContent = "正在获取二维码…";
+    clearQrBox();
     try {
       const data = await call("POST", "auth/qrcode", {});
-      const wrap = $("qr-wrap");
-      wrap.hidden = false;
+      const url = data.url || "";
       const box = $("qr-box");
       box.innerHTML = "";
-      const url = data.url || "";
       if (window.qrcode) {
-        const qr = window.qrcode(0, "M");
-        qr.addData(url);
-        qr.make();
-        box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 6 });
+        const qrCode = window.qrcode(0, "M");
+        qrCode.addData(url);
+        qrCode.make();
+        box.innerHTML = qrCode.createSvgTag({ cellSize: 4, margin: 6 });
       }
-      const link = $("qr-link");
-      link.innerHTML = "";
-      const anchor = el("a", "", "在浏览器打开登录页");
+      const anchor = el("a", "", url ? "在浏览器打开登录页" : "");
       anchor.href = url;
       anchor.target = "_blank";
       anchor.rel = "noreferrer";
-      link.appendChild(anchor);
-      $("qr-hint").textContent = "请使用 B 站手机客户端扫码（约 3 分钟内有效）";
-      const key = data.qrcode_key;
-      qrTimer = setInterval(async () => {
+      $("qr-link").appendChild(anchor);
+      $("qr-hint").textContent = "请使用 B 站手机客户端扫码";
+      qr.key = data.qrcode_key;
+      qr.deadline = Date.now() + (Number(data.expires_in) || 180) * 1000;
+      updateCountdown();
+      qr.ticker = setInterval(updateCountdown, 1000);
+      qr.timer = setInterval(async () => {
         try {
-          const poll = await call("GET", "auth/poll", { key });
-          $("qr-hint").textContent = poll.message || "";
+          const poll = await call("GET", "auth/poll", { key: qr.key });
+          qr.fails = 0;
+          $("qr-hint").textContent = poll.message || "等待扫码…";
           if (poll.status === "ok") {
-            stopQr();
+            stopQr("登录成功", "ok");
             $("qr-wrap").hidden = true;
-            toast("登录成功", "ok");
+            clearQrBox();
             loaders.overview();
           } else if (poll.status === "expired" || poll.status === "error") {
-            stopQr();
+            stopQr(poll.message || "二维码已失效", "error");
+            $("qr-hint").textContent = poll.message || "二维码已失效";
+            clearQrBox();
           }
         } catch (err) {
-          stopQr();
+          qr.fails += 1;
+          if (qr.fails >= 3) {
+            stopQr("网络异常，已暂停轮询；可点「检查登录态」确认结果", "error");
+          }
         }
       }, 2000);
     } catch (err) {
-      /* toast 已提示 */
+      $("qr-hint").textContent = "二维码获取失败，请稍后重试";
     }
   });
 
+  $("btn-qr-cancel").addEventListener("click", () => {
+    stopQr();
+    $("qr-wrap").hidden = true;
+    clearQrBox();
+  });
+
   $("btn-auth-refresh").addEventListener("click", async () => {
+    const btn = $("btn-auth-refresh");
+    btn.disabled = true;
     try {
       const data = await call("GET", "auth/status", { verify: 1 });
       renderAuth(data);
       toast(data.logged_in ? "登录态有效" : "当前未登录或已失效", data.logged_in ? "ok" : "error");
     } catch (err) {
-      /* ignore */
+      /* toast 已提示 */
+    } finally {
+      btn.disabled = false;
     }
   });
 
@@ -305,10 +580,11 @@
       await call("POST", "auth/logout", {});
       stopQr();
       $("qr-wrap").hidden = true;
+      clearQrBox();
       await loaders.overview();
       toast("已退出登录");
     } catch (err) {
-      /* ignore */
+      /* toast 已提示 */
     }
   });
 
@@ -322,66 +598,61 @@
       await call("POST", "auth/cookie", { cookie: raw });
       $("cookie-input").value = "";
       await loaders.overview();
-      toast("Cookie 已保存", "ok");
+      toast("Cookie 已校验并保存", "ok");
     } catch (err) {
-      /* ignore */
+      /* toast 已提示 */
     }
   });
 
+  let authTimer = null;
+  function ensureAuthPolling() {
+    if (authTimer) return;
+    authTimer = setInterval(async () => {
+      if (document.hidden || currentTab !== "overview") return;
+      try {
+        const data = await call("GET", "auth/status", {});
+        renderAuth(data);
+      } catch (err) {
+        /* 静默 */
+      }
+    }, 45000);
+  }
+
   /* ---------------------------------------------------------------- 解析 */
-
-  async function pollTasks(containerId, filters) {
-    const box = $(containerId);
-    try {
-      const tasks = await call("GET", "tasks", { limit: 20 });
-      const items = (tasks || []).filter((task) => !filters || filters.includes(task.kind));
-      if (!items.length) {
-        box.textContent = "暂无任务";
-        box.className = "muted";
-        return false;
-      }
-      box.className = "";
-      box.innerHTML = "";
-      items.forEach((task) => box.appendChild(taskRow(task, false)));
-      return items.some((task) => task.status === "queued" || task.status === "running");
-    } catch (err) {
-      return false;
-    }
-  }
-
-  let taskTimer = null;
-  function startTaskPolling() {
-    if (taskTimer) return;
-    taskTimer = setInterval(async () => {
-      if (currentTab !== "parse" && currentTab !== "collection") return;
-      const active = await pollTasks("task-list", ["video"]);
-      const activeCol = await pollTasks("col-task-list", ["collection"]);
-      if (!active && !activeCol) {
-        clearInterval(taskTimer);
-        taskTimer = null;
-      }
-    }, 1500);
-  }
 
   $("btn-parse").addEventListener("click", async () => {
     const url = $("parse-url").value.trim();
+    const page = Math.max(1, parseInt($("parse-page").value, 10) || 1);
     if (!url) {
       toast("请输入视频链接或 BV 号", "error");
       return;
     }
+    const btn = $("btn-parse");
+    btn.disabled = true;
     try {
-      const data = await call("POST", "parse", { url, force: $("parse-force").checked });
-      toast("已加入队列：" + (data.target || ""), "ok");
-      await pollTasks("task-list", ["video"]);
-      startTaskPolling();
+      const data = await call("POST", "parse", {
+        url,
+        page,
+        force: $("parse-force").checked,
+      });
+      toast("已加入队列：" + (data.target || url), "ok");
+      if (currentTab !== "parse") switchTab("parse");
+      await refreshVisibleTasks();
+      ensureTaskPolling();
     } catch (err) {
-      /* ignore */
+      /* toast 已提示 */
+    } finally {
+      btn.disabled = false;
     }
   });
 
+  $("parse-url").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") $("btn-parse").click();
+  });
+
   $("btn-refresh-tasks").addEventListener("click", async () => {
-    const active = await pollTasks("task-list", ["video"]);
-    if (active) startTaskPolling();
+    const active = await refreshVisibleTasks();
+    if (active) ensureTaskPolling();
   });
 
   $("btn-collection").addEventListener("click", async () => {
@@ -390,18 +661,27 @@
       toast("请输入合集链接", "error");
       return;
     }
+    const btn = $("btn-collection");
+    btn.disabled = true;
     try {
       const data = await call("POST", "collection", { url, force: $("col-force").checked });
-      toast("合集已加入队列：" + (data.target || ""), "ok");
-      await pollTasks("col-task-list", ["collection"]);
-      startTaskPolling();
+      toast("合集已加入队列：" + (data.target || url), "ok");
+      if (currentTab !== "collection") switchTab("collection");
+      await refreshVisibleTasks();
+      ensureTaskPolling();
     } catch (err) {
-      /* ignore */
+      /* toast 已提示 */
+    } finally {
+      btn.disabled = false;
     }
   });
 
-  loaders.parse = () => pollTasks("task-list", ["video"]);
-  loaders.collection = () => pollTasks("col-task-list", ["collection"]);
+  loaders.parse = () => loadTaskList("task-list", ["video", "url"]).then((active) => {
+    if (active) ensureTaskPolling();
+  });
+  loaders.collection = () => loadTaskList("col-task-list", ["collection"]).then((active) => {
+    if (active) ensureTaskPolling();
+  });
 
   /* ---------------------------------------------------------------- 词条 */
 
@@ -413,23 +693,37 @@
     if (reset) {
       memeOffset = 0;
       memeItems = [];
+      loading($("meme-table"));
     }
     const query = $("meme-query").value.trim();
     const status = $("meme-status").value;
     try {
-      const data = await call("GET", "memes", { query, status, limit: MEME_PAGE, offset: memeOffset });
+      const data = await call("GET", "memes", {
+        query,
+        status,
+        limit: MEME_PAGE,
+        offset: memeOffset,
+      });
       memeItems = memeItems.concat(data.items || []);
       memeOffset = memeItems.length;
       $("meme-count").textContent = "共 " + (data.total || 0) + " 条，已显示 " + memeItems.length + " 条";
-      renderMemes();
+      if (!memeItems.length) {
+        const box = $("meme-table");
+        box.innerHTML = "";
+        box.className = "empty";
+        box.textContent = query || status ? "没有匹配的词条" : "词条库还是空的，先去解析一个视频吧";
+      } else {
+        renderMemes();
+      }
       $("btn-meme-more").hidden = memeItems.length >= (data.total || 0);
     } catch (err) {
-      /* ignore */
+      errorState($("meme-table"), "词条加载失败", err.message || "");
     }
   }
 
   function renderMemes() {
     const table = $("meme-table");
+    table.className = "";
     table.innerHTML =
       "<thead><tr><th>词条</th><th>释义</th><th>热度</th><th>置信</th><th>状态</th><th>同步</th><th></th></tr></thead>";
     const body = el("tbody");
@@ -455,9 +749,9 @@
           await call("POST", "meme/delete", { id: meme.id });
           memeItems.splice(index, 1);
           renderMemes();
-          toast("已删除");
+          toast("已删除", "ok");
         } catch (err) {
-          /* ignore */
+          /* toast 已提示 */
         }
       });
       ops.appendChild(edit);
@@ -472,12 +766,14 @@
     const dialog = el("dialog", "modal");
     dialog.innerHTML =
       '<form method="dialog">' +
-      '<h3>编辑词条：' + esc(meme.term) + "</h3>" +
+      "<h3>编辑词条：" + esc(meme.term) + "</h3>" +
       '<label class="lbl">释义</label><textarea name="definition" rows="3">' + esc(meme.definition || "") + "</textarea>" +
       '<label class="lbl">用法</label><textarea name="usage" rows="2">' + esc(meme.usage || "") + "</textarea>" +
       '<label class="lbl">出处</label><textarea name="origin" rows="2">' + esc(meme.origin || "") + "</textarea>" +
       '<label class="lbl">状态</label><select name="status">' +
-      ["published", "draft", "archived"].map((s) => '<option value="' + s + '"' + (meme.status === s ? " selected" : "") + ">" + s + "</option>").join("") +
+      ["published", "draft", "archived"]
+        .map((s) => '<option value="' + s + '"' + (meme.status === s ? " selected" : "") + ">" + s + "</option>")
+        .join("") +
       "</select>" +
       '<div class="btn-row"><button class="btn" value="cancel">取消</button><button class="btn primary" value="save">保存</button></div>' +
       "</form>";
@@ -511,26 +807,29 @@
   $("meme-query").addEventListener("keydown", (event) => {
     if (event.key === "Enter") loadMemes(true);
   });
+  $("meme-status").addEventListener("change", () => loadMemes(true));
   $("btn-meme-more").addEventListener("click", () => loadMemes(false));
   loaders.memes = () => loadMemes(true);
 
   /* ---------------------------------------------------------------- 审核 */
 
   async function loadReviews() {
+    const box = $("review-list");
+    loading(box);
     try {
       const data = await call("GET", "reviews", { status: "pending", limit: 50 });
-      const box = $("review-list");
       const items = data.items || [];
       if (!items.length) {
-        box.textContent = "暂无待审核项";
-        box.className = "muted";
+        emptyState(box, "暂无待审核项", "新词条与已有词条定义冲突时会出现在这里");
         return;
       }
       box.className = "";
       box.innerHTML = "";
       items.forEach((review) => {
         const card = el("div", "review");
-        card.appendChild(el("div", "review-reason", review.kind + " · " + (review.reason || "")));
+        card.appendChild(
+          el("div", "review-reason", (review.kind || "冲突") + " · " + (review.reason || ""))
+        );
         const payload = review.payload || {};
         const term = payload.term || (payload.candidate && payload.candidate.term) || "";
         const def = payload.definition || (payload.candidate && payload.candidate.definition) || "";
@@ -549,7 +848,7 @@
         box.appendChild(card);
       });
     } catch (err) {
-      /* ignore */
+      errorState(box, "审核列表加载失败", err.message || "");
     }
   }
 
@@ -558,9 +857,9 @@
       await call("POST", "review/resolve", { id, action });
       await loadReviews();
       loaders.overview();
-      toast(action === "approve" ? "已采纳" : "已忽略");
+      toast(action === "approve" ? "已采纳" : "已忽略", "ok");
     } catch (err) {
-      /* ignore */
+      /* toast 已提示 */
     }
   }
 
@@ -571,39 +870,40 @@
 
   async function loadSlangs() {
     const scope = $("slang-scope").value.trim();
+    const box = $("slang-list");
     if (!scope) {
-      toast("请先填写作用域", "error");
+      toast("请先填写作用域，如 group:123456789", "error");
       return;
     }
     localStorage.setItem("mh_scope", scope);
+    loading(box);
     try {
       const items = await call("GET", "slangs", { scope });
-      const box = $("slang-list");
-      box.className = "";
-      box.innerHTML = "";
       if (!items.length) {
-        box.className = "muted";
-        box.textContent = "该作用域暂无黑话";
+        emptyState(box, "该作用域暂无黑话", "在下方「新增 / 覆盖」里添加");
         return;
       }
+      box.className = "";
+      box.innerHTML = "";
       items.forEach((item) => {
         const row = el("div", "slang");
         row.appendChild(el("span", "term", item.term));
         row.appendChild(el("span", "def", item.definition || ""));
         const del = el("button", "btn tiny danger", "删除");
         del.addEventListener("click", async () => {
+          if (!confirm("删除黑话「" + item.term + "」？")) return;
           try {
             await call("POST", "slang/delete", { scope, term: item.term });
             await loadSlangs();
           } catch (err) {
-            /* ignore */
+            /* toast 已提示 */
           }
         });
         row.appendChild(del);
         box.appendChild(row);
       });
     } catch (err) {
-      /* ignore */
+      errorState(box, "群黑话加载失败", err.message || "");
     }
   }
 
@@ -626,7 +926,7 @@
       await loadSlangs();
       toast("已保存", "ok");
     } catch (err) {
-      /* ignore */
+      /* toast 已提示 */
     }
   });
 
@@ -634,6 +934,7 @@
     const saved = localStorage.getItem("mh_scope");
     if (saved && !$("slang-scope").value) $("slang-scope").value = saved;
     if ($("slang-scope").value) loadSlangs();
+    else emptyState($("slang-list"), "先填写作用域", "例如 group:123456789，然后点「加载」");
   };
 
   /* ---------------------------------------------------------------- 设置 */
@@ -677,54 +978,101 @@
     max_source_chars: { label: "文本源最大字数", type: "int" },
   };
 
+  const SETTING_GROUPS = [
+    {
+      title: "模型与抽取",
+      keys: ["provider_id", "json_mode", "temperature", "max_tokens", "llm_timeout", "chunk_chars", "max_chunks", "max_source_chars"],
+    },
+    {
+      title: "多平台视频与本地转写",
+      keys: ["media_enabled", "transcribe_enabled", "whisper_model", "whisper_device", "whisper_compute_type", "transcribe_language", "media_max_duration", "transcribe_timeout", "download_timeout", "ytdlp_cookies_file", "ytdlp_proxy", "keep_temp_files"],
+    },
+    {
+      title: "网页抓取",
+      keys: ["web_enabled", "web_timeout", "web_max_bytes", "web_min_chars", "web_cookies"],
+    },
+    {
+      title: "B 站采集与队列",
+      keys: ["request_interval", "collection_page_size", "max_collection_items", "queue_concurrency", "raw_retention_days"],
+    },
+    {
+      title: "入库、检索与同步",
+      keys: ["review_required", "memewiki_enabled", "memewiki_min_confidence", "inject_enabled", "inject_max_chars", "auto_parse_on_link"],
+    },
+  ];
+
+  function settingField(key, value, providers) {
+    const meta = SETTING_META[key] || { label: key, type: "str" };
+    const row = el("div", "field");
+    row.appendChild(el("label", "lbl", meta.label));
+    let input;
+    if (meta.type === "bool") {
+      input = el("input");
+      input.type = "checkbox";
+      input.checked = !!value;
+    } else if (meta.type === "provider") {
+      input = el("select");
+      const auto = el("option", "", "跟随默认模型");
+      auto.value = "";
+      input.appendChild(auto);
+      (providers || []).forEach((p) => {
+        const option = el("option", "", (p.model || p.id) + " · " + (p.id || ""));
+        option.value = p.id;
+        input.appendChild(option);
+      });
+      input.value = value || "";
+    } else if (meta.type === "int" || meta.type === "float") {
+      input = el("input");
+      input.type = "number";
+      input.step = meta.type === "int" ? "1" : "0.1";
+      input.value = value;
+    } else {
+      input = el("input");
+      input.type = "text";
+      input.value = value || "";
+    }
+    input.dataset.key = key;
+    input.dataset.type = meta.type;
+    row.appendChild(input);
+    if (meta.hint) row.appendChild(el("div", "muted small", meta.hint));
+    return row;
+  }
+
   async function loadSettings() {
+    const form = $("settings-form");
+    form.innerHTML = "";
+    form.appendChild(el("div", "muted small", "加载中…"));
     try {
       const [settings, providers] = await Promise.all([
         call("GET", "settings", {}),
         call("GET", "providers", {}).catch(() => []),
       ]);
-      const form = $("settings-form");
       form.innerHTML = "";
-      Object.keys(settings).forEach((key) => {
-        const meta = SETTING_META[key] || { label: key, type: "str" };
-        const row = el("div", "field");
-        const label = el("label", "lbl", meta.label);
-        row.appendChild(label);
-        let input;
-        if (meta.type === "bool") {
-          input = el("input");
-          input.type = "checkbox";
-          input.checked = !!settings[key];
-        } else if (meta.type === "provider") {
-          input = el("select");
-          const auto = el("option", "", "跟随默认模型");
-          auto.value = "";
-          input.appendChild(auto);
-          (providers || []).forEach((p) => {
-            const option = el("option", "", (p.model || p.id) + " · " + (p.id || ""));
-            option.value = p.id;
-            input.appendChild(option);
-          });
-          input.value = settings[key] || "";
-        } else if (meta.type === "int" || meta.type === "float") {
-          input = el("input");
-          input.type = "number";
-          input.step = meta.type === "int" ? "1" : "0.1";
-          input.value = settings[key];
-        } else {
-          input = el("input");
-          input.type = "text";
-          input.value = settings[key] || "";
-        }
-        input.dataset.key = key;
-        input.dataset.type = meta.type;
-        row.appendChild(input);
-        if (meta.hint) row.appendChild(el("div", "muted small", meta.hint));
-        form.appendChild(row);
+      const used = new Set();
+      SETTING_GROUPS.forEach((group) => {
+        const keys = group.keys.filter((key) => key in settings);
+        if (!keys.length) return;
+        keys.forEach((key) => used.add(key));
+        const details = el("details", "group");
+        details.open = true;
+        details.appendChild(el("summary", "", group.title + "（" + keys.length + " 项）"));
+        const body = el("div", "group-body");
+        keys.forEach((key) => body.appendChild(settingField(key, settings[key], providers)));
+        details.appendChild(body);
+        form.appendChild(details);
       });
+      const rest = Object.keys(settings).filter((key) => !used.has(key));
+      if (rest.length) {
+        const details = el("details", "group");
+        details.appendChild(el("summary", "", "其它（" + rest.length + " 项）"));
+        const body = el("div", "group-body");
+        rest.forEach((key) => body.appendChild(settingField(key, settings[key], providers)));
+        details.appendChild(body);
+        form.appendChild(details);
+      }
       renderWarnings([]);
     } catch (err) {
-      /* ignore */
+      errorState(form, "设置加载失败", err.message || "");
     }
   }
 
@@ -738,6 +1086,8 @@
       else if (type === "float") payload[key] = parseFloat(input.value) || 0;
       else payload[key] = input.value;
     });
+    const btn = $("btn-settings-save");
+    btn.disabled = true;
     try {
       const data = await call("POST", "settings/save", payload);
       if (data.warnings && data.warnings.length) {
@@ -748,7 +1098,9 @@
         renderWarnings([]);
       }
     } catch (err) {
-      /* ignore */
+      /* toast 已提示 */
+    } finally {
+      btn.disabled = false;
     }
   });
 
@@ -758,15 +1110,15 @@
 
   (async function boot() {
     try {
-      await readyPromise;
+      pageContext = (await readyPromise) || {};
     } catch (err) {
-      /* 独立打开页面时没有父窗口，仍尝试直连 */
+      pageContext = {};
     }
     try {
       await loaders.overview();
-      await pollTasks("task-list", ["video"]);
+      ensureAuthPolling();
     } catch (err) {
-      /* ignore */
+      /* 概览已提示 */
     }
   })();
 })();

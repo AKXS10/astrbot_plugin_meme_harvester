@@ -267,6 +267,7 @@ class BiliClient:
             ("dm", "/x/v2/dm/view", False),
         )
         last_error: BiliError | None = None
+        succeeded = False
         for provider, path, signed in attempts:
             params = dict(base)
             if provider == "dm":
@@ -279,6 +280,7 @@ class BiliClient:
                     raise
                 last_error = exc
                 continue
+            succeeded = True
             exclusive = bool(data.get("is_upower_exclusive"))
             playable = bool(data.get("is_upower_play"))
             if exclusive and not playable:
@@ -290,6 +292,12 @@ class BiliClient:
                 return tracks, provider
         if last_error is not None and last_error.code == ErrorCode.LOGIN_EXPIRED:
             raise last_error
+        if not succeeded and last_error is not None:
+            # 所有端点都失败：不要伪装成「没有字幕」，把真实原因带出去
+            raise BiliError(
+                ErrorCode.NO_SUBTITLE,
+                f"字幕接口均失败（{last_error.code.value}：{last_error}）",
+            )
         return [], ""
 
     async def resolve_ai_subtitle_url(self, *, aid: int, cid: int) -> str:

@@ -219,7 +219,7 @@ class WebApi:
         if target.kind in ("season", "series"):
             return _fail(
                 "BAD_URL",
-                "这是合集/系列链接，请到「合集解析」页提交（会逐条解析并入库）",
+                "这是 B 站合集/系列链接，请到「合集解析」页提交（会逐条解析并入库）",
             )
         if target.kind != "video":
             return _fail(ErrorCode.BAD_URL.value, "暂不支持该链接类型")
@@ -256,7 +256,8 @@ class WebApi:
     async def tasks(self):
         limit = _to_int(request.query.get("limit", 20), 20, 1, 200)
         status = request.query.get("status") or None
-        return _ok(await self.plugin.storage.list_tasks(limit=limit, status=status))
+        kind = str(request.query.get("kind", "") or "") or None
+        return _ok(await self.plugin.storage.list_tasks(limit=limit, status=status, kind=kind))
 
     @_api
     async def task(self):
@@ -272,11 +273,11 @@ class WebApi:
     async def task_cancel(self):
         body = await _body()
         task_id = str(body.get("id") or "")
+        if not task_id:
+            return _fail("BAD_REQUEST", "缺少任务 id")
         cancelled = self.plugin.queue.cancel(task_id)
         if not cancelled:
-            await self.plugin.storage.update_task(
-                task_id, status="cancelled", last_error="用户取消"
-            )
+            return _fail("NOT_CANCELLED", "任务已结束或不存在，无法取消", 409)
         return _ok({"cancelled": True})
 
     # -------------------------------------------------------------- 词条

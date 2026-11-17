@@ -59,6 +59,8 @@ class AuthManager:
         self._lock = asyncio.Lock()
         self._pending_key = ""
         self._pending_at = 0.0
+        self._last_verify = 0.0
+        self._verify_ttl = 20.0
         self.account: dict[str, Any] | None = None
         self.state = "unknown"  # unknown / ok / expired / none
 
@@ -150,6 +152,13 @@ class AuthManager:
     async def status(self, *, verify: bool = False) -> dict[str, Any]:
         if self.account is None and self.state in ("unknown", "none"):
             await self.restore()
+        # 重启后 Cookie 已恢复但尚未校验：自动打一次 nav，避免 UI 一直显示「未登录」
+        if (
+            self.account is not None
+            and self.state == "unknown"
+            and time.monotonic() - self._last_verify > self._verify_ttl
+        ):
+            return await self.refresh()
         if verify and self.account is not None:
             return await self.refresh()
         acct = self._public_account() or {}
@@ -168,6 +177,7 @@ class AuthManager:
 
     async def refresh(self) -> dict[str, Any]:
         """调用 nav 校验登录态；-101/-352 时标记失效。"""
+        self._last_verify = time.monotonic()
         if not self.client.cookies:
             self.state = "none"
             return await self.status()

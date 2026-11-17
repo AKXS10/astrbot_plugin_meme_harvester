@@ -1,17 +1,14 @@
-name: astrbot_plugin_meme_harvester
-display_name: 梗采集器
-short_desc: 从视频字幕与网页正文采集网络梗，自动整理入库并同步梗百科
+﻿name: astrbot_plugin_meme_harvester
+display_name: 姊楅噰闆嗗櫒
+short_desc: 浠庤棰戝瓧骞曚笌缃戦〉姝ｆ枃閲囬泦缃戠粶姊楋紝鑷姩鏁寸悊鍏ュ簱骞跺悓姝ユ鐧剧
 desc: |
-  把「最新在用的梗」变成 Bot 能用的知识。
-
-  - 单条视频：B 站贴链接即可解析 CC / AI 字幕；其它平台交给 yt-dlp，有字幕用字幕，没字幕可本地 Whisper 转写
-  - 网页抓取：萌娘百科 / MediaWiki 走 API，普通网页提取正文，统一抽取词条
-  - 合集解析：按 B 站合集 / 系列批量入队，限速爬取，断点续跑
-  - 本地词库：SQLite 存储，支持检索、审核、去重与置信度
-  - 梗百科兼容：进程内写入 astrbot_plugin_memewiki 的自定义黑话（只增不改，冲突进审核队列）
-  - WebUI：解析链接、管理词条、维护群黑话、扫码或粘贴 Cookie 登录、查看同步日志
-  - 群黑话：按群隔离，命中优先于公共词库
-version: 0.2.0
+  鎶娿€屾渶鏂板湪鐢ㄧ殑姊椼€嶅彉鎴?Bot 鑳界敤鐨勭煡璇嗐€?
+  - 鍗曟潯瑙嗛锛欱 绔欒创閾炬帴鍗冲彲瑙ｆ瀽 CC / AI 瀛楀箷锛涘叾瀹冨钩鍙颁氦缁?yt-dlp锛屾湁瀛楀箷鐢ㄥ瓧骞曪紝娌″瓧骞曞彲鏈湴 Whisper 杞啓
+  - 缃戦〉鎶撳彇锛氳悓濞樼櫨绉?/ MediaWiki 璧?API锛屾櫘閫氱綉椤垫彁鍙栨鏂囷紝缁熶竴鎶藉彇璇嶆潯
+  - 鍚堥泦瑙ｆ瀽锛氭寜 B 绔欏悎闆?/ 绯诲垪鎵归噺鍏ラ槦锛岄檺閫熺埇鍙栵紝鏂偣缁窇
+  - 鏈湴璇嶅簱锛歋QLite 瀛樺偍锛屾敮鎸佹绱€佸鏍搞€佸幓閲嶄笌缃俊搴?  - 姊楃櫨绉戝吋瀹癸細杩涚▼鍐呭啓鍏?astrbot_plugin_memewiki 鐨勮嚜瀹氫箟榛戣瘽锛堝彧澧炰笉鏀癸紝鍐茬獊杩涘鏍搁槦鍒楋級
+  - WebUI锛氳В鏋愰摼鎺ャ€佺鐞嗚瘝鏉°€佺淮鎶ょ兢榛戣瘽銆佹壂鐮佹垨绮樿创 Cookie 鐧诲綍銆佹煡鐪嬪悓姝ユ棩蹇?  - 缇ら粦璇濓細鎸夌兢闅旂锛屽懡涓紭鍏堜簬鍏叡璇嶅簱
+version: 0.2.1
 author: meme-harvester
 repo: https://github.com/your-name/astrbot_plugin_meme_harvester
 astrbot_version: ">=4.13,<5"
@@ -24,10 +21,9 @@ support_platforms:
   - slack
   - webchat
 tags:
-  - 梗
-  - 黑话
+  - 姊?  - 榛戣瘽
   - bilibili
-  - 视频字幕
-  - 网页抓取
+  - 瑙嗛瀛楀箷
+  - 缃戦〉鎶撳彇
   - whisper
   - WebUI

@@ -903,13 +903,24 @@ class Storage:
 
         return await self._read(run)
 
-    async def list_tasks(self, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
+    async def list_tasks(
+        self,
+        limit: int = 20,
+        status: str | None = None,
+        kind: str | None = None,
+    ) -> list[dict[str, Any]]:
         def run() -> list[dict[str, Any]]:
             sql = "SELECT * FROM tasks"
             params: list[Any] = []
+            clauses: list[str] = []
             if status:
-                sql += " WHERE status=?"
+                clauses.append("status=?")
                 params.append(status)
+            if kind:
+                clauses.append("kind=?")
+                params.append(kind)
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
             sql += " ORDER BY created_at DESC LIMIT ?"
             params.append(int(limit))
             with self._conn() as conn:

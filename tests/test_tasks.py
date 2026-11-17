@@ -32,11 +32,11 @@ class FakePipeline:
             raise self.error
         return VideoResult(bvid=bvid, status="done", memes_created=2)
 
-    async def process_collection(self, target, *, progress=None):
+    async def process_collection(self, target, *, force=False, progress=None):
         self.calls.append(("collection", target.kind, target.season_id))
         if progress is not None:
             await progress("collection 1/2", 50)
-        return {"total": 2, "processed": 2}
+        return {"total": 2, "processed": 2, "done": 2}
 
 
 class TaskQueueTests(unittest.IsolatedAsyncioTestCase):

@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 _BV_RE = re.compile(r"(BV[0-9A-Za-z]{10})")
 _AV_RE = re.compile(r"(?:^|/|video/)av(\d+)", re.IGNORECASE)
 _SPACE_RE = re.compile(r"^/(\d+)/")
+_LISTS_RE = re.compile(r"^/\d+/lists/(\d+)$")
 _SID_RE = re.compile(r"[?&]sid=(\d+)")
 
 ALLOWED_HOSTS = {
@@ -88,6 +89,15 @@ def parse_target(text: str) -> ParsedTarget:
     if "/video" in parsed.path and mid and sid:
         # space 的视频页带 sid 时也当作合集
         return ParsedTarget(kind="season", raw=raw, mid=mid, season_id=sid)
+
+    # 新式合集路径：space.bilibili.com/<mid>/lists/<id>?type=season|series
+    lists = _LISTS_RE.match(parsed.path or "")
+    if lists and mid:
+        list_id = int(lists.group(1))
+        list_type = (query.get("type", ["season"])[0] or "season").lower()
+        if list_type == "series":
+            return ParsedTarget(kind="series", raw=raw, mid=mid, series_id=list_id)
+        return ParsedTarget(kind="season", raw=raw, mid=mid, season_id=list_id)
 
     return ParsedTarget(kind="unsupported", raw=raw, reason="暂不支持该页面类型")
 

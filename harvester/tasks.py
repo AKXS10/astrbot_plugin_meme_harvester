@@ -103,15 +103,39 @@ class TaskQueue:
                 await self.storage.update_task(task_id, status="cancelled", last_error="用户取消")
                 raise
             except BiliError as exc:
+                merged = dict(payload)
+                merged["stage"] = state["stage"] or merged.get("stage", "")
+                merged["result"] = {
+                    "status": "failed",
+                    "error": exc.code.value,
+                    "message": str(exc),
+                }
                 await self.storage.update_task(
-                    task_id, status="failed", progress=100, last_error=exc.code.value
+                    task_id,
+                    status="failed",
+                    progress=100,
+                    last_error=exc.code.value,
+                    payload=merged,
                 )
-                await self.storage.add_log("error", f"task_{kind}", f"{target}: {exc.code.value}")
+                await self.storage.add_log(
+                    "error", f"task_{kind}", f"{target}: {exc.code.value} {exc}"[:500]
+                )
             except Exception as exc:  # noqa: BLE001
+                merged = dict(payload)
+                merged["stage"] = state["stage"] or merged.get("stage", "")
+                merged["result"] = {
+                    "status": "failed",
+                    "error": "INTERNAL",
+                    "message": str(exc)[:300],
+                }
                 await self.storage.update_task(
-                    task_id, status="failed", progress=100, last_error=f"INTERNAL: {exc}"[:300]
+                    task_id,
+                    status="failed",
+                    progress=100,
+                    last_error=f"INTERNAL: {exc}"[:300],
+                    payload=merged,
                 )
-                await self.storage.add_log("error", f"task_{kind}", f"{target}: {exc}")
+                await self.storage.add_log("error", f"task_{kind}", f"{target}: {exc}"[:500])
             else:
                 merged = dict(payload)
                 merged["result"] = result
@@ -152,7 +176,9 @@ class TaskQueue:
                 season_id=int(payload.get("season_id") or 0),
                 series_id=int(payload.get("series_id") or 0),
             )
-            summary = await self.pipeline.process_collection(parsed, progress=progress)
+            summary = await self.pipeline.process_collection(
+                parsed, force=bool(payload.get("force")), progress=progress
+            )
             return summary
         if kind == "sync":
             if self._sync_fn is None:

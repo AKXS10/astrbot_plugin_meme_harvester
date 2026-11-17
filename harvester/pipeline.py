@@ -29,6 +29,14 @@ from .text import segments_to_plain, split_chunks
 ProgressFn = Callable[[str, int], Awaitable[None]]
 
 
+def _split_video_key(key: str) -> tuple[str, int]:
+    """把 "BV..." / "av123" 统一成 (bvid, aid) 供 view 接口使用。"""
+    key = (key or "").strip()
+    if key.lower().startswith("av") and key[2:].isdigit():
+        return "", int(key[2:])
+    return key, 0
+
+
 @dataclass(slots=True)
 class VideoResult:
     bvid: str = ""
@@ -114,7 +122,8 @@ class VideoPipeline:
         result = VideoResult(bvid=bvid, platform="bilibili")
         await self._progress(progress, "resolving", 5)
 
-        info = await self.client.get_video_info(bvid=bvid)
+        bvid, aid = _split_video_key(bvid)
+        info = await self.client.get_video_info(bvid=bvid, aid=aid)
         if page > 1 and info.pages:
             match = next((p for p in info.pages if int(p.get("page") or 0) == page), None)
             if match is not None:
@@ -247,11 +256,13 @@ class VideoPipeline:
         self,
         target: ParsedTarget,
         *,
+        force: bool = False,
         progress: ProgressFn | None = None,
     ) -> dict[str, Any]:
         settings = self._settings()
         summary: dict[str, Any] = {
             "total": 0,
+            "done": 0,
             "processed": 0,
             "skipped": 0,
             "failed": 0,
@@ -274,7 +285,7 @@ class VideoPipeline:
                 pct = min(99, int(index * 100 / max(1, len(videos))))
                 await self._progress(progress, f"collection {index}/{len(videos)}", pct)
             try:
-                result = await self.process_video(video.bvid)
+                result = await self.process_video(video.bvid, force=force)
             except BiliError as exc:
                 if exc.code in (ErrorCode.RISK_CONTROL, ErrorCode.LOGIN_EXPIRED):
                     summary["aborted"] = exc.code.value
@@ -286,6 +297,7 @@ class VideoPipeline:
                 summary["skipped"] += 1
             else:
                 summary["processed"] += 1
+                summary["done"] += 1
             summary["memes_created"] += result.memes_created
             summary["items"].append(result.to_dict())
 
