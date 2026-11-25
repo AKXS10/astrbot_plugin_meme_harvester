@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -140,22 +141,31 @@ class MemeHarvesterPlugin(Star):
         return merged
 
     async def terminate(self) -> None:
-        try:
-            task = getattr(self, "_temp_task", None)
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
-            if self._ready:
-                await self.queue.shutdown()
-                await self.client.close()
-                await self.media.close()
-                await self.web.close()
-                await self.storage.close()
-        except Exception:  # noqa: BLE001
-            logger.exception("[meme_harvester] 关闭时出错")
+        task = getattr(self, "_temp_task", None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        # 逐个资源独立收尾：半初始化（_ready 仍为 False，例如 storage.open() 之后
+        # queue.start() 抛错）也要把已经打开的 sqlite 句柄关掉，否则热重载撞
+        # database is locked。每步各自兜异常，一个失败不影响后面的清理。
+        closers: list[tuple[str, Any]] = [
+            ("queue", getattr(self.queue, "shutdown", None)),
+            ("client", getattr(self.client, "close", None)),
+            ("media", getattr(self.media, "close", None)),
+            ("web", getattr(self.web, "close", None)),
+            ("storage", getattr(self.storage, "close", None)),
+        ]
+        self._ready = False
+        for name, closer in closers:
+            if closer is None:
+                continue
+            try:
+                await closer()
+            except Exception:  # noqa: BLE001
+                logger.exception("[meme_harvester] 关闭 %s 时出错", name)
 
     # ------------------------------------------------------------ 临时文件
 

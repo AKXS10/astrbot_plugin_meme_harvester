@@ -13,7 +13,7 @@ from harvester.constants import ErrorCode
 from harvester.models import SyncResult
 from harvester.pipeline import VideoResult
 from harvester.storage import Storage
-from harvester.tasks import TaskQueue
+from harvester.tasks import DynamicLimiter, TaskQueue
 
 
 class FakePipeline:
@@ -108,6 +108,34 @@ class TaskQueueTests(unittest.IsolatedAsyncioTestCase):
         task_id = await self.queue.submit("video", "BV1xx411c7mD")
         snapshot = await self.queue.wait(task_id)
         self.assertEqual(snapshot["payload"]["stage"], "fetching_subtitle")
+
+
+class DynamicLimiterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shrinking_limit_never_over_issues(self) -> None:
+        """上限从 3 调到 1 时，已在跑的不会被脱管，新任务也不会瞬间超发。"""
+        limiter = DynamicLimiter()
+        active = 0
+        peak = 0
+        release = asyncio.Event()
+
+        async def worker(limit: int) -> None:
+            nonlocal active, peak
+            async with limiter.slot(limit):
+                active += 1
+                peak = max(peak, active)
+                await release.wait()
+                active -= 1
+
+        tasks = [asyncio.create_task(worker(3)) for _ in range(3)]
+        await asyncio.sleep(0.05)
+        self.assertEqual(peak, 3)
+        # 运行中把上限压到 1：再来两个任务必须排队，active 不能变成 5
+        tasks += [asyncio.create_task(worker(1)) for _ in range(2)]
+        await asyncio.sleep(0.05)
+        self.assertEqual(active, 3)
+        release.set()
+        await asyncio.gather(*tasks)
+        self.assertEqual(active, 0)
 
 
 if __name__ == "__main__":

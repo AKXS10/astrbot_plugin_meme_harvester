@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -37,7 +38,17 @@ class TempStore:
         path = self.dir / f"{_safe_name(source_id)}.txt"
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         header = f"# {title}\n# source={source_id} provider={provider} saved={stamp}\n\n"
-        path.write_text(header + text, encoding="utf-8")
+        # 原子写：先写同目录临时文件再 os.replace，避免 WebUI 并发读到半截内容。
+        tmp = path.with_name(f"{path.name}.tmp")
+        try:
+            tmp.write_text(header + text, encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
         return path
 
     def cleanup(self, days: int = 3) -> int:

@@ -64,6 +64,12 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.exception.code, ErrorCode.RISK_CONTROL)
         self.assertEqual(len(transport.calls), 1)  # 第二次没有发请求
 
+    async def test_qr_poll_missing_code_is_not_success(self) -> None:
+        """缺 code 不能当成 QR_SUCCESS(0)，否则会被误判成「登录态无效，请重新扫码」。"""
+        client, _ = make_client(lambda url, params, headers: api_ok({"message": "风控页"}))
+        data = await client.qr_poll("KEY")
+        self.assertEqual(data["code"], -1)
+
     async def test_breaker_is_per_host(self) -> None:
         """主站被 -412 熔断后，护照站（扫码登录）不应被一起锁死。"""
 

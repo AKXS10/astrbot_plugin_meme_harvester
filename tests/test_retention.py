@@ -115,6 +115,16 @@ class TempStoreTests(unittest.TestCase):
         self.assertEqual(stats["files"], 1)
         self.assertGreater(stats["bytes"], 0)
 
+    def test_save_is_atomic_and_leaves_no_tmp(self) -> None:
+        """原子写：落盘后不应残留 .tmp，覆盖同名来源后内容应是新的。"""
+        first = self.store.save("BV1xx", title="旧", provider="cc", text="旧内容")
+        second = self.store.save("BV1xx", title="新", provider="cc", text="新内容")
+        self.assertEqual(Path(first), Path(second))
+        self.assertEqual(list(Path(second).parent.glob("*.tmp")), [])
+        data = Path(second).read_text(encoding="utf-8")
+        self.assertIn("新内容", data)
+        self.assertNotIn("旧内容", data)
+
     def test_cleanup_removes_only_expired(self) -> None:
         old = Path(self.store.save("old", title="旧", provider="cc", text="旧内容"))
         new = Path(self.store.save("new", title="新", provider="cc", text="新内容"))

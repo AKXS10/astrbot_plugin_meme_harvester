@@ -146,10 +146,12 @@ class BiliClient:
                     url, params=query_params, headers=self._headers(referer)
                 )
                 break
-            except (asyncio.TimeoutError, OSError) as exc:
-                # 插件刚重载 / 网络抖动时首个请求偶发 20s 超时，重试一次再报错。
+            except Exception as exc:  # noqa: BLE001 - aiohttp.ClientError 等网络层异常统一重试一次
+                # 插件刚重载 / 网络抖动时首个请求偶发超时，重试一次再报错。
+                # CancelledError 继承 BaseException，不会被这里吞掉。
                 if attempt == 1:
                     await asyncio.sleep(1.0)
+                    await self._throttle()  # 重试同样受请求间隔约束，避免瞬间打两次
                     continue
                 raise BiliError(
                     ErrorCode.INTERNAL,
@@ -245,8 +247,14 @@ class BiliClient:
             {"qrcode_key": qrcode_key},
             host=BILI_PASSPORT_HOST,
         )
+        # 缺 code 不能当成 QR_SUCCESS(0)：那会直接跳到「登录态无效，请重新扫码」。
+        raw_code = data.get("code")
+        try:
+            code = int(raw_code) if raw_code is not None else -1
+        except (TypeError, ValueError):
+            code = -1
         return {
-            "code": int(data.get("code") or 0),
+            "code": code,
             "message": str(data.get("message") or ""),
             "url": str(data.get("url") or ""),
         }

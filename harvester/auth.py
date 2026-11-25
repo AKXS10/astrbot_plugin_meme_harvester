@@ -249,7 +249,14 @@ class AuthManager:
             self._pending_key = ""
             return {"status": "expired", "message": "二维码已过期，请刷新"}
         data = await self.client.qr_poll(key)
-        code = int(data.get("code") or 0)
+        try:
+            code = int(data.get("code"))
+        except (TypeError, ValueError):
+            code = -1
+        if code < 0:
+            # 没拿到明确状态（空响应/换了字段）时既不能判成功也不能判过期，
+            # 保持等待让前端继续轮询。
+            return {"status": "waiting", "message": data.get("message") or "等待扫码"}
         if code == QR_SUCCESS:
             account = await self._finalize("qrcode")
             self._pending_key = ""

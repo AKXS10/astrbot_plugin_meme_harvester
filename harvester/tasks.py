@@ -17,6 +17,47 @@ from .storage import Storage
 SyncFn = Callable[[], Awaitable[Any]]
 
 
+class _LimiterSlot:
+    """``DynamicLimiter.slot(limit)`` 的异步上下文管理器。"""
+
+    def __init__(self, limiter: "DynamicLimiter", limit: int) -> None:
+        self._limiter = limiter
+        self._limit = limit
+
+    async def __aenter__(self) -> None:
+        await self._limiter._acquire(self._limit)
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await self._limiter._release()
+
+
+class DynamicLimiter:
+    """动态并发上限。
+
+    旧实现每次 ``queue_concurrency`` 变化就换一个新的 ``asyncio.Semaphore``，
+    已在跑的任务仍持有旧信号量，新任务立刻拿到新信号量的名额 —— 瞬间超发。
+    这里用一个计数 + 条件变量，上限只影响「下一次放行」，不会让在跑任务脱管。
+    """
+
+    def __init__(self) -> None:
+        self._cond = asyncio.Condition()
+        self._active = 0
+
+    def slot(self, limit: int) -> _LimiterSlot:
+        return _LimiterSlot(self, max(1, int(limit)))
+
+    async def _acquire(self, limit: int) -> None:
+        async with self._cond:
+            while self._active >= limit:
+                await self._cond.wait()
+            self._active += 1
+
+    async def _release(self) -> None:
+        async with self._cond:
+            self._active = max(0, self._active - 1)
+            self._cond.notify_all()
+
+
 class TaskQueue:
     """轻量任务队列。
 
@@ -38,7 +79,7 @@ class TaskQueue:
         self._settings = settings_getter
         self._sync_fn = sync_fn
         self._logger = logger
-        self._sem = asyncio.Semaphore(1)
+        self._limiter = DynamicLimiter()
         self._running: dict[str, asyncio.Task[Any]] = {}
         self._started = False
         self._submit_lock = asyncio.Lock()
@@ -113,10 +154,7 @@ class TaskQueue:
 
     async def _execute(self, task_id: str, kind: str, target: str, payload: dict[str, Any]) -> None:
         concurrency = max(1, min(4, int(getattr(self._settings(), "queue_concurrency", 1) or 1)))
-        if concurrency != getattr(self, "_concurrency", None):
-            self._concurrency = concurrency
-            self._sem = asyncio.Semaphore(concurrency)
-        async with self._sem:
+        async with self._limiter.slot(concurrency):
             await self.storage.update_task(task_id, status="running", progress=1)
             state = {"pct": -100, "ts": 0.0, "stage": ""}
             progress = self._progress_fn(task_id, payload, state)

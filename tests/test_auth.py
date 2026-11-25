@@ -196,6 +196,14 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.client.cookies, {})
         self.assertEqual(self.storage.accounts, {})
 
+    def test_poll_qr_without_code_stays_waiting(self) -> None:
+        """轮询拿不到 code 时保持等待，既不判成功也不判过期。"""
+        run(self.auth.start_qr())
+        self.client.qr = {}
+        result = run(self.auth.poll_qr())
+        self.assertEqual(result["status"], "waiting")
+        self.assertNotIn(1001, self.storage.accounts)
+
 
 if __name__ == "__main__":
     unittest.main()

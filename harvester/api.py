@@ -240,7 +240,9 @@ class WebApi:
             )
         target = parse_target(raw)
         if target.kind == "short":
-            final = await self.plugin.client.resolve_short_link(raw)
+            # parse_target 已把裸 "b23.tv/xxx" 补成 https:// 再存进 raw，
+            # 这里必须用 target.raw，否则不带 scheme 的输入会被 yarl 判为非法 URL。
+            final = await self.plugin.client.resolve_short_link(target.raw)
             target = parse_target(final)
         if target.kind == "unsupported":
             return _fail(ErrorCode.BAD_URL.value, target.reason or "无法识别的链接")
