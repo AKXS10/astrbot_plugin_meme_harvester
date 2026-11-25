@@ -9,11 +9,12 @@ from typing import Any, Callable
 
 from astrbot.api.web import file_response, json_response, request
 
-from .auth import AuthError
+from .config import _as_bool
 from .bili.client import BiliError
 from .bili.urls import parse_target
 from .constants import ERROR_MESSAGES, PLUGIN_NAME, ErrorCode
 from .sources.classify import classify_url
+from .text import is_meaningful_term
 
 PREFIX = f"/{PLUGIN_NAME}"
 _BOOL_KEYS = {
@@ -212,7 +213,7 @@ class WebApi:
         raw = str(body.get("url") or "").strip()
         if not raw:
             return _fail("BAD_URL", "请输入视频 / 网页链接或 BV 号")
-        force = bool(body.get("force"))
+        force = _as_bool(body.get("force"), False)
         route = classify_url(raw)
         if route.kind != "bilibili":
             if route.kind == "unsupported":
@@ -280,7 +281,7 @@ class WebApi:
             "mid": target.mid,
             "season_id": target.season_id,
             "series_id": target.series_id,
-            "force": bool(body.get("force")),
+            "force": _as_bool(body.get("force"), False),
         }
         name = f"season:{target.season_id}" if target.season_id else f"series:{target.series_id}"
         existing = await self.plugin.storage.find_tasks_by_target(name, kind="collection")
@@ -370,6 +371,12 @@ class WebApi:
         if not meme_id:
             return _fail("BAD_REQUEST", "缺少词条 id")
         fields_in: dict[str, Any] = {}
+        new_term = ""
+        if "term" in body:
+            new_term = str(body.get("term") or "").strip()
+            if not is_meaningful_term(new_term):
+                return _fail("BAD_REQUEST", "词条名需 2–24 字且含中文或字母")
+            fields_in["term"] = new_term
         if "definition" in body:
             fields_in["definition"] = str(body.get("definition") or "")[:300]
         if "usage" in body:
@@ -385,10 +392,27 @@ class WebApi:
             if status not in ("draft", "published", "archived"):
                 return _fail("BAD_REQUEST", "非法状态")
             fields_in["status"] = status
-        ok = await self.plugin.storage.update_meme(meme_id, **fields_in)
+        old = await self.plugin.storage.get_meme(meme_id) if new_term else None
+        try:
+            ok = await self.plugin.storage.update_meme(meme_id, **fields_in)
+        except ValueError as exc:
+            return _fail("CONFLICT", str(exc), 409)
         if not ok:
             return _fail("NOT_FOUND", "词条不存在", 404)
-        return _ok({"updated": True})
+        result: dict[str, Any] = {"updated": True}
+        if new_term and old and old.get("term") and old["term"] != new_term:
+            result["renamed"] = True
+            result["old_term"] = old["term"]
+            # 改名后把梗百科里的旧条目移除（由下次同步写入新名）。
+            # 不能以 sync_state == "synced" 为前提：改名本身会把 sync_state
+            # 重置为 pending，连续改名（A→B→A）时第二步就漏删，梗百科留下孤儿条目。
+            # remove_term 自身只会删 author == "meme_harvester" 且确实存在的条目，
+            # 对不存在的名字返回 False，所以无条件调用是安全且幂等的。
+            result["memewiki_removed"] = await self.plugin.memewiki.remove_term(old["term"])
+            await self.plugin.storage.add_log(
+                "info", "meme_edit", f"词条改名：{old['term']} → {new_term}"
+            )
+        return _ok(result)
 
     @_api
     async def meme_delete(self):
@@ -501,7 +525,7 @@ class WebApi:
     async def memewiki_sync(self):
         body = await _body()
         limit = _to_int(body.get("limit", 200), 200, 1, 1000)
-        result = await self.plugin.memewiki.sync(limit=limit, dry_run=bool(body.get("dry_run")))
+        result = await self.plugin.memewiki.sync(limit=limit, dry_run=_as_bool(body.get("dry_run"), False))
         data = result.to_dict() if hasattr(result, "to_dict") else result
         await self.plugin.storage.add_log(
             "info", "memewiki_sync", f"同步完成：{data}"

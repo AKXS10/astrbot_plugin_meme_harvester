@@ -148,6 +148,51 @@ class MemewikiAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["mode"], MODE_INPROCESS)
         self.assertEqual(status["pending"], 1)
 
+    async def test_remove_term_deletes_only_harvester_entries(self) -> None:
+        self.plugin._user_terms["采集的词"] = {
+            "meaning": "我们写入的释义",
+            "author": "meme_harvester",
+            "author_name": "梗采集器",
+            "ts": "2024-01-02 00:00:00",
+        }
+        removed = await self.adapter.remove_term("采集的词")
+        self.assertTrue(removed)
+        self.assertNotIn("采集的词", self.plugin._user_terms)
+        self.assertEqual(self.plugin.saved, 1)
+        self.assertIn("采集的词", self.plugin.invalidated)
+
+        # 用户手建（author=webui）的同名词不动
+        kept = await self.adapter.remove_term("老词")
+        self.assertFalse(kept)
+        self.assertIn("老词", self.plugin._user_terms)
+        self.assertEqual(self.plugin.saved, 1)
+
+        # 空名 / 不存在的词
+        self.assertFalse(await self.adapter.remove_term(""))
+        self.assertFalse(await self.adapter.remove_term("不存在的词"))
+
+    async def test_remove_term_unavailable_mode(self) -> None:
+        adapter = MemewikiAdapter(FakeContext(None), self.storage, self.data_dir)
+        self.assertFalse(await adapter.remove_term("任意词"))
+
+    async def test_remove_term_save_failure_rolls_back(self) -> None:
+        self.plugin._user_terms["会失败的词"] = {
+            "meaning": "x",
+            "author": "meme_harvester",
+            "author_name": "梗采集器",
+            "ts": "2024-01-03 00:00:00",
+        }
+
+        def boom() -> None:
+            raise RuntimeError("disk full")
+
+        self.plugin._save_user_terms = boom  # type: ignore[method-assign]
+        removed = await self.adapter.remove_term("会失败的词")
+        self.assertFalse(removed)
+        # 落盘失败：内存回滚，词还在（与 sync() 回滚策略一致）
+        self.assertIn("会失败的词", self.plugin._user_terms)
+        self.assertIn("老词", self.plugin._user_terms)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -817,10 +817,12 @@
   }
 
   function openMemeEditor(meme) {
+    const oldTerm = meme.term || "";
     const dialog = el("dialog", "modal");
     dialog.innerHTML =
       '<form method="dialog">' +
-      "<h3>编辑词条：" + esc(meme.term) + "</h3>" +
+      "<h3>编辑词条：" + esc(oldTerm) + "</h3>" +
+      '<label class="lbl">标题</label><input type="text" name="term" maxlength="24" value="' + esc(oldTerm) + '" />' +
       '<label class="lbl">释义</label><textarea name="definition" rows="3">' + esc(meme.definition || "") + "</textarea>" +
       '<label class="lbl">用法</label><textarea name="usage" rows="2">' + esc(meme.usage || "") + "</textarea>" +
       '<label class="lbl">出处</label><textarea name="origin" rows="2">' + esc(meme.origin || "") + "</textarea>" +
@@ -838,6 +840,7 @@
         return;
       }
       const form = dialog.querySelector("form");
+      const newTerm = form.term.value.trim();
       const payload = {
         id: meme.id,
         definition: form.definition.value,
@@ -845,11 +848,19 @@
         origin: form.origin.value,
         status: form.status.value,
       };
+      if (newTerm && newTerm !== oldTerm) {
+        if (newTerm.length < 2) {
+          toast("词条名至少 2 个字", "err");
+          dialog.remove();
+          return;
+        }
+        payload.term = newTerm;
+      }
       try {
         await call("POST", "meme/update", payload);
         dialog.remove();
         await loadMemes(true);
-        toast("已保存", "ok");
+        toast(payload.term ? "已保存，标题已更新" : "已保存", "ok");
       } catch (err) {
         dialog.remove();
       }

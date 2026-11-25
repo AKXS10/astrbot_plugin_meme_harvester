@@ -245,6 +245,9 @@ class AuthManager:
     # ------------------------------------------------------------ 粘贴
 
     async def save_cookie_text(self, raw: str) -> dict[str, Any]:
+        if len(raw) > 20_000:
+            # 防御性上限：正常浏览器 Cookie 头不会超过几 KB，超长多半是误粘整页内容
+            raise AuthError(ErrorCode.BAD_URL, "Cookie 内容过长（>20000 字符），请只粘贴请求头里的 Cookie 值")
         cookies = parse_cookie_string(raw)
         if not cookies:
             raise AuthError(ErrorCode.BAD_URL, "Cookie 格式无法解析，请粘贴完整 Cookie 字符串")

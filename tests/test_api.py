@@ -48,6 +48,22 @@ class FakeStorage:
     def __init__(self) -> None:
         self.saved_settings: dict = {}
         self.logs: list[tuple] = []
+        self.memes: dict[int, dict] = {}
+        self.update_calls: list[tuple] = []
+        self.update_error: Exception | None = None
+
+    async def get_meme(self, meme_id):
+        return self.memes.get(meme_id)
+
+    async def update_meme(self, meme_id, **fields):
+        if self.update_error is not None:
+            raise self.update_error
+        if meme_id not in self.memes:
+            return False
+        self.update_calls.append((meme_id, fields))
+        # 模拟真实存储：返回新行对象，不与 get_meme 的返回值共享引用
+        self.memes[meme_id] = {**self.memes[meme_id], **fields}
+        return True
 
     async def stats(self):
         return {"memes": 3, "videos": 1, "reviews": 0, "slangs": 2, "transcripts": 1, "fts": True}
@@ -80,11 +96,19 @@ class FakeProbe:
 
 
 class FakeMemewiki:
+    def __init__(self) -> None:
+        self.removed: list[str] = []
+        self.missing: set[str] = set()
+
     def probe(self):
         return FakeProbe()
 
     async def status(self):
         return {"mode": "inprocess", "pending": 2}
+
+    async def remove_term(self, name):
+        self.removed.append(name)
+        return name not in self.missing
 
 
 class FakeAuth:
@@ -185,6 +209,82 @@ class ApiTests(unittest.TestCase):
         data = body(run(self.api.memes()))["data"]
         self.assertEqual(data["total"], 1)
         self.assertEqual(data["items"][0]["term"], "典")
+
+    def test_meme_update_rename_synced_triggers_memewiki_removal(self) -> None:
+        self.plugin.storage.memes[5] = {
+            "id": 5,
+            "term": "旧梗名",
+            "sync_state": "synced",
+            "status": "published",
+        }
+        self.use(payload={"id": 5, "term": "新梗名"})
+        data = body(run(self.api.meme_update()))["data"]
+        self.assertEqual(data["renamed"], True)
+        self.assertEqual(data["old_term"], "旧梗名")
+        self.assertEqual(data["memewiki_removed"], True)
+        self.assertEqual(self.plugin.memewiki.removed, ["旧梗名"])
+        self.assertEqual(self.plugin.storage.update_calls[0][1]["term"], "新梗名")
+        self.assertTrue(any("词条改名" in str(log[2]) for log in self.plugin.storage.logs))
+
+    def test_meme_update_rename_pending_also_removes_memewiki(self) -> None:
+        # 改名会把 sync_state 重置为 pending，不能因此跳过梗百科旧条目的清理，
+        # 否则 A→B→A 连续改名会留下孤儿条目。
+        self.plugin.storage.memes[7] = {
+            "id": 7,
+            "term": "没同步的词",
+            "sync_state": "pending",
+            "status": "published",
+        }
+        self.use(payload={"id": 7, "term": "改个名"})
+        data = body(run(self.api.meme_update()))["data"]
+        self.assertEqual(data["renamed"], True)
+        self.assertEqual(data["memewiki_removed"], True)
+        self.assertEqual(self.plugin.memewiki.removed, ["没同步的词"])
+
+    def test_meme_update_rename_when_memewiki_missing_still_renames(self) -> None:
+        # 梗百科侧没有这条（或不是本插件写入的）时，remove_term 返回 False，
+        # 但改名本身必须成功，且不影响词条数据。
+        self.plugin.storage.memes[9] = {
+            "id": 9,
+            "term": "梗百科没有的词",
+            "sync_state": "synced",
+            "status": "published",
+        }
+        self.plugin.memewiki.missing.add("梗百科没有的词")
+        self.use(payload={"id": 9, "term": "还是改个名"})
+        data = body(run(self.api.meme_update()))["data"]
+        self.assertEqual(data["renamed"], True)
+        self.assertEqual(data["old_term"], "梗百科没有的词")
+        self.assertEqual(data["memewiki_removed"], False)
+        self.assertEqual(self.plugin.storage.update_calls[0][1]["term"], "还是改个名")
+
+    def test_meme_update_rename_conflict_maps_to_409(self) -> None:
+        self.plugin.storage.memes[5] = {"id": 5, "term": "旧梗名", "sync_state": "synced"}
+        self.plugin.storage.update_error = ValueError("词条名已存在：别的词")
+        self.use(payload={"id": 5, "term": "新梗名"})
+        payload = body(run(self.api.meme_update()))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "CONFLICT")
+        self.assertEqual(self.plugin.memewiki.removed, [])
+
+    def test_meme_update_rejects_short_term(self) -> None:
+        self.use(payload={"id": 5, "term": "x"})
+        payload = body(run(self.api.meme_update()))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "BAD_REQUEST")
+
+    def test_meme_update_without_term_no_memewiki_touch(self) -> None:
+        self.plugin.storage.memes[5] = {
+            "id": 5,
+            "term": "原词",
+            "sync_state": "synced",
+            "status": "published",
+        }
+        self.use(payload={"id": 5, "definition": "新释义"})
+        data = body(run(self.api.meme_update()))["data"]
+        self.assertEqual(data["updated"], True)
+        self.assertNotIn("renamed", data)
+        self.assertEqual(self.plugin.memewiki.removed, [])
 
     def test_parse_submits_task(self) -> None:
         self.use(payload={"url": "BV1xx411c7mD"})

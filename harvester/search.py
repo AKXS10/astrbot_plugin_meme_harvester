@@ -89,9 +89,9 @@ class MemeSearch:
             return ""
         if scope:
             slangs = await self.storage.find_slangs(scope, term, limit=3)
-            for row in slangs:
-                if str(row.get("term") or "") == term:
-                    return f"{term}：{row.get('definition') or ''}"
+            if slangs:
+                row = slangs[0]
+                return f"{row.get('term')}：{row.get('definition') or ''}"
         meme = await self.storage.find_meme(term)
         if meme is None:
             hits = await self.storage.list_memes(term, limit=3)

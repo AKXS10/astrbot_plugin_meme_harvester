@@ -11,7 +11,7 @@ import re
 import socket
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from ..bili.client import BiliError
@@ -339,6 +339,12 @@ class WebPageResolver:
         self._settings = settings_getter or (lambda: None)
         self.guard = guard or SSRFGuard()
         self.logger = logger
+
+    async def close(self) -> None:
+        """关闭底层传输；测试假传输可能没有 close，容错处理。"""
+        close = getattr(self.transport, "close", None)
+        if close is not None:
+            await close()
 
     def _opt(self, name: str, default: Any) -> Any:
         settings = self._settings()

@@ -7,6 +7,7 @@ import time
 import traceback
 from typing import Any, Awaitable, Callable
 
+from .config import _as_bool
 from .bili.client import BiliError
 from .bili.urls import ParsedTarget
 from .constants import ErrorCode
@@ -40,6 +41,7 @@ class TaskQueue:
         self._sem = asyncio.Semaphore(1)
         self._running: dict[str, asyncio.Task[Any]] = {}
         self._started = False
+        self._submit_lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._started:
@@ -60,9 +62,12 @@ class TaskQueue:
     async def submit(self, kind: str, target: str, payload: dict[str, Any] | None = None) -> str:
         """同一链接只保留一条进度：清掉旧记录后重新排队。"""
         payload = payload or {}
-        for record in await self.storage.find_tasks_by_target(target, kind=kind):
-            await self.clear(record["id"])
-        task_id = await self.storage.create_task(kind, target, payload)
+        # 加锁串行化：两个并发 submit 同一 target 时，避免同时读到旧记录、
+        # 各自 clear/create 导致重复排队或把对方刚创建的任务清掉
+        async with self._submit_lock:
+            for record in await self.storage.find_tasks_by_target(target, kind=kind):
+                await self.clear(record["id"])
+            task_id = await self.storage.create_task(kind, target, payload)
         self._spawn(task_id, kind, target, dict(payload))
         return task_id
 
@@ -75,6 +80,9 @@ class TaskQueue:
                 await asyncio.wait_for(asyncio.shield(task), timeout=5)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
+            task = self._running.get(task_id)
+            if task is not None and not task.done() and not task.cancelled():
+                return False
         return await self.storage.delete_task(task_id)
 
     def cancel(self, task_id: str) -> bool:
@@ -177,7 +185,7 @@ class TaskQueue:
             result = await self.pipeline.process_video(
                 target,
                 page=int(payload.get("page") or 1),
-                force=bool(payload.get("force")),
+                force=_as_bool(payload.get("force"), False),
                 progress=progress,
             )
             return result.to_dict()
@@ -185,7 +193,7 @@ class TaskQueue:
             result = await self.pipeline.process_url(
                 str(payload.get("url") or target),
                 page=int(payload.get("page") or 1),
-                force=bool(payload.get("force")),
+                force=_as_bool(payload.get("force"), False),
                 progress=progress,
             )
             return result.to_dict()
@@ -198,7 +206,7 @@ class TaskQueue:
                 series_id=int(payload.get("series_id") or 0),
             )
             summary = await self.pipeline.process_collection(
-                parsed, force=bool(payload.get("force")), progress=progress
+                parsed, force=_as_bool(payload.get("force"), False), progress=progress
             )
             return summary
         if kind == "sync":

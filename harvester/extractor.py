@@ -9,7 +9,6 @@ from .constants import (
     CANDIDATE_KEYWORDS,
     EXTRACT_SYSTEM_PROMPT,
     EXTRACT_USER_TEMPLATE,
-    ErrorCode,
 )
 from .llm import LLMError, parse_llm_json
 from .models import MemeCandidate, Segment

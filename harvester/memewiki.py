@@ -15,7 +15,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .constants import MEMEWIKI_MAX_MEANING, MEMEWIKI_MAX_TERM, MEMEWIKI_PLUGIN_NAME
 from .models import SyncResult
@@ -63,6 +63,13 @@ class MemewikiAdapter:
         self._logger = logger
         self._lock = asyncio.Lock()
 
+    def _log(self, level: str, message: str) -> None:
+        if self._logger is not None:
+            try:
+                getattr(self._logger, level, self._logger.info)(message)
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------ 探测
 
     def probe(self) -> Probe:
@@ -109,58 +116,79 @@ class MemewikiAdapter:
             return result
 
         plugin = probe.plugin
-        entries: dict[str, dict[str, Any]] = {}
         skipped_ids: list[int] = []
         skipped_reason: list[str] = []
         existed_ids: list[int] = []
+        added: dict[str, int] = {}  # term -> meme_id
 
+        # 判重与写入放进同一个梗百科锁，保证两步的原子性：
+        # 先逐一校验、经 setdefault 登记新增项，成功后一次性落盘
         async with self._lock:
-            existing_norm = {normalize_term(str(name)) for name in plugin._user_terms}
-            for meme in pending:
-                term = str(meme.get("term") or "").strip()
-                meaning = str(meme.get("definition") or "").strip()
-                if not term or len(term) > MEMEWIKI_MAX_TERM:
-                    skipped_ids.append(int(meme["id"]))
-                    skipped_reason.append("term_too_long")
-                    continue
-                if not meaning:
-                    skipped_ids.append(int(meme["id"]))
-                    skipped_reason.append("empty_definition")
-                    continue
-                if term in plugin._user_terms or normalize_term(term) in existing_norm:
-                    existed_ids.append(int(meme["id"]))
-                    continue
-                entries[term] = {
-                    "meaning": truncate(meaning, MEMEWIKI_MAX_MEANING),
-                    "author": "meme_harvester",
-                    "author_name": "梗采集器",
-                    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            async with plugin._terms_lock:
+                existing_norm = {
+                    normalize_term(str(name)) for name in plugin._user_terms
                 }
+                for meme in pending:
+                    meme_id = int(meme.get("id") or 0)
+                    term = str(meme.get("term") or "").strip()
+                    meaning = str(meme.get("definition") or "").strip()
+                    if not term or len(term) > MEMEWIKI_MAX_TERM:
+                        skipped_ids.append(meme_id)
+                        skipped_reason.append("term_too_long")
+                        continue
+                    if not meaning:
+                        skipped_ids.append(meme_id)
+                        skipped_reason.append("empty_definition")
+                        continue
+                    norm_key = normalize_term(term)
+                    if term in plugin._user_terms or norm_key in existing_norm:
+                        existed_ids.append(meme_id)
+                        continue
+                    if dry_run:
+                        # 干跑：不动内存、不落盘，只统计"将会新增"
+                        existing_norm.add(norm_key)
+                        added[term] = meme_id
+                        continue
+                    entry = {
+                        "meaning": truncate(meaning, MEMEWIKI_MAX_MEANING),
+                        "author": "meme_harvester",
+                        "author_name": "梗采集器",
+                        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    # setdefault：键已存在时不覆盖既有内容
+                    if plugin._user_terms.setdefault(term, entry) is entry:
+                        existing_norm.add(norm_key)
+                        added[term] = meme_id
+                    else:
+                        # 并发写入撞上的同名词条：不覆盖，记为已存在
+                        existed_ids.append(meme_id)
+
+                if not dry_run and added:
+                    try:
+                        await asyncio.to_thread(plugin._save_user_terms)
+                    except Exception as exc:  # noqa: BLE001
+                        # 落盘失败：回滚内存新增，让内存和文件保持一致
+                        for name in added:
+                            plugin._user_terms.pop(name, None)
+                        result.failed = len(added)
+                        result.message = f"写入梗百科失败: {exc}"
+                        await self.storage.add_log("error", "memewiki_sync", result.message)
+                        return result
+
+            for name in added:
+                try:
+                    plugin._invalidate_term_cache(name)
+                except Exception:  # noqa: BLE001
+                    pass
 
             result.existed = len(existed_ids)
             result.skipped = len(skipped_ids)
+            result.synced = len(added)
 
-            if entries and not dry_run:
-                try:
-                    async with plugin._terms_lock:
-                        plugin._user_terms.update(entries)
-                        await asyncio.to_thread(plugin._save_user_terms)
-                except Exception as exc:  # noqa: BLE001
-                    result.failed = len(entries)
-                    result.message = f"写入梗百科失败: {exc}"
-                    await self.storage.add_log("error", "memewiki_sync", result.message)
-                    return result
-                for name in entries:
-                    try:
-                        plugin._invalidate_term_cache(name)
-                    except Exception:  # noqa: BLE001
-                        pass
-
-            result.synced = len(entries)
-            synced_ids = [int(m["id"]) for m in pending if str(m.get("term") or "").strip() in entries]
             if not dry_run:
-                if synced_ids:
-                    await self.storage.mark_synced(synced_ids, "synced", slug="memewiki:custom")
+                added_ids = list(added.values())
+                if added_ids:
+                    await self.storage.mark_synced(added_ids, "synced", slug="memewiki:custom")
                 if existed_ids:
                     await self.storage.mark_synced(existed_ids, "existed", slug="memewiki:custom")
                 if skipped_ids:
@@ -175,6 +203,51 @@ class MemewikiAdapter:
             return result
 
     # ------------------------------------------------------------ 导出兜底
+
+    async def remove_term(self, name: str) -> bool:
+        """词条改名 / 删除时，把梗百科里「本插件写入的同名旧词条」一并移除。
+
+        只删 author == "meme_harvester" 的条目：用户在梗百科 WebUI 手动建的
+        同名黑话不动。返回是否实际删除。
+        """
+        name = str(name or "").strip()
+        if not name:
+            return False
+        probe = self.probe()
+        if probe.mode != MODE_INPROCESS or probe.plugin is None:
+            return False
+        plugin = probe.plugin
+        removed = False
+        try:
+            async with self._lock:
+                async with plugin._terms_lock:
+                    entry = plugin._user_terms.get(name)
+                    if not isinstance(entry, dict):
+                        return False
+                    if str(entry.get("author") or "") != "meme_harvester":
+                        return False
+                    plugin._user_terms.pop(name, None)
+                    removed = True
+                    try:
+                        await asyncio.to_thread(plugin._save_user_terms)
+                    except Exception:
+                        # 落盘失败：回滚内存删除，保持内存与文件一致（与 sync() 同策略）
+                        plugin._user_terms[name] = entry
+                        raise
+            if removed:
+                try:
+                    plugin._invalidate_term_cache(name)
+                except Exception:  # noqa: BLE001
+                    pass
+                await self.storage.add_log(
+                    "info", "memewiki_sync", f"词条改名，已移除梗百科旧条目：{name}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            await self.storage.add_log(
+                "warn", "memewiki_sync", f"移除梗百科旧条目失败（{name}）: {exc}"
+            )
+            return False
+        return removed
 
     async def export_jsonl(self, limit: int = 500) -> Path:
         """把待同步词条导出成 JSONL，供手动导入或排查。返回文件路径。"""

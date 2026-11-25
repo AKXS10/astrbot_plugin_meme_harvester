@@ -1,4 +1,4 @@
-﻿name: astrbot_plugin_meme_harvester
+name: astrbot_plugin_meme_harvester
 display_name: 梗采集器
 short_desc: 从视频字幕与网页正文采集网络梗，自动整理入库并同步梗百科
 desc: |
@@ -10,9 +10,9 @@ desc: |
   - 梗百科兼容：进程内写入 astrbot_plugin_memewiki 的自定义黑话（只增不改，冲突进审核队列）
   - WebUI：解析链接、管理词条、维护群黑话、扫码或粘贴 Cookie 登录、查看同步日志
   - 群黑话：按群隔离，命中优先于公共词库
-version: 0.2.4
+version: 0.2.9
 author: meme-harvester
-repo: https://github.com/your-name/astrbot_plugin_meme_harvester
+repo: https://github.com/AKXS10/astrbot_plugin_meme_harvester
 astrbot_version: ">=4.13,<5"
 support_platforms:
   - aiocqhttp

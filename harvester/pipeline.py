@@ -300,6 +300,11 @@ class VideoPipeline:
             if outcome.failed_chunks:
                 result.notes.append(f"{outcome.failed_chunks} 个字幕块抽取失败")
 
+            # LLM 所有块都失败（无任何产出）时抛错而非 done，
+            # 否则该视频之后会被 skip 永久跳过，再也无法重试
+            if outcome.chunks_total > 0 and len(outcome.candidates) == 0 and outcome.failed_chunks > 0:
+                raise BiliError(ErrorCode.LLM_FAILED, "所有内容块抽取均失败，模型无任何有效输出。")
+
             await self._progress(progress, "storing", 80)
             result.memes_total = len(outcome.candidates)
             default_status = "published" if not settings.review_required else "draft"
@@ -439,6 +444,12 @@ class VideoPipeline:
                     break
                 summary["failed"] += 1
                 summary["items"].append({"bvid": video.bvid, "status": "failed", "error": exc.code.value})
+                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                summary["failed"] += 1
+                summary["items"].append({"bvid": video.bvid, "status": "failed", "error": str(exc)[:100]})
                 continue
             if result.status == "skipped":
                 summary["skipped"] += 1
@@ -622,6 +633,11 @@ class VideoPipeline:
                 result.notes.append("未命中梗关键词，已用前两段内容兜底抽取")
             if outcome.failed_chunks:
                 result.notes.append(f"{outcome.failed_chunks} 个内容块抽取失败")
+
+            # LLM 所有块都失败（无任何产出）时标 empty 而非 done，
+            # 否则该目标之后会被 skip 永久跳过，再也无法重试
+            if outcome.chunks_total > 0 and len(outcome.candidates) == 0 and outcome.failed_chunks > 0:
+                raise BiliError(ErrorCode.LLM_FAILED, "所有内容块抽取均失败，模型无任何有效输出。")
 
             await self._progress(progress, "storing", 80)
             result.memes_total = len(outcome.candidates)

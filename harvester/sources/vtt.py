@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from typing import Iterable
 
@@ -43,9 +44,11 @@ def clean_cue_text(text: str) -> str:
 def parse_subtitle_text(text: str, fmt: str = "") -> list[Segment]:
     """按格式解析；未指定时根据内容猜测。"""
     content = (text or "").lstrip("\ufeff")
-    lowered = (fmt or "").lower()
+    lowered = (fmt or "").lower().strip(".")
     if lowered in ("vtt", "webvtt") or content.lstrip().upper().startswith("WEBVTT"):
         return parse_vtt(content)
+    if lowered == "json3" or lowered == "json":
+        return parse_json3(content)
     if lowered == "srt" or "-->" in content:
         return parse_srt(content) if lowered == "srt" else _parse_generic(content)
     return []
@@ -58,6 +61,60 @@ def parse_vtt(content: str) -> list[Segment]:
 
 def parse_srt(content: str) -> list[Segment]:
     return _parse_blocks((content or "").lstrip("\ufeff"))
+
+
+def parse_json3(content: str) -> list[Segment]:
+    """解析 JSON 字幕：YouTube json3（events/segs）与 B 站 JSON（body/from/to/content）。"""
+    try:
+        data = json.loads((content or "").strip())
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw: list[tuple[int, int, str]] = []
+
+    # YouTube json3: {"events":[{"tStartMs":0,"dDurationMs":1000,"segs":[{"utf8":"..."}]}]}
+    events = data.get("events")
+    if isinstance(events, list):
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            try:
+                start = int(event.get("tStartMs") or 0)
+                duration = int(event.get("dDurationMs") or 0)
+            except (ValueError, TypeError):
+                continue
+            segs = event.get("segs")
+            if not isinstance(segs, list):
+                continue
+            body = clean_cue_text("".join(str(s.get("utf8") or "") for s in segs if isinstance(s, dict)))
+            if not body:
+                continue
+            if duration <= 0:
+                duration = 1500
+            raw.append((start, start + duration, body))
+
+    # B 站 JSON: {"body":[{"from":..,"to":..,"content":".."}]}
+    entries = data.get("body")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                start = int(float(entry.get("from") or 0) * 1000)
+                end = int(float(entry.get("to") or 0) * 1000)
+            except (ValueError, TypeError):
+                continue
+            body = clean_cue_text(str(entry.get("content") or ""))
+            if not body:
+                continue
+            if end <= start:
+                end = start + 1500
+            raw.append((start, end, body))
+
+    if not raw:
+        return []
+    return _dedupe(raw)
 
 
 def _parse_generic(content: str) -> list[Segment]:

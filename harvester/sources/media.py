@@ -96,6 +96,12 @@ class MediaResolver:
         self.transcriber = transcriber or Transcriber(settings_getter, logger=logger)
         self.logger = logger
 
+    async def close(self) -> None:
+        """关闭底层传输；测试假传输可能没有 close，容错处理。"""
+        close = getattr(self.transport, "close", None)
+        if close is not None:
+            await close()
+
     def _opt(self, name: str, default: Any) -> Any:
         settings = self._settings()
         return getattr(settings, name, default) if settings is not None else default

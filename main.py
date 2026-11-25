@@ -54,7 +54,7 @@ def _data_dir() -> Path:
     "MemeHarvester",
     "从 B 站字幕自动抽取网络梗，支持合集批量解析、WebUI 管理与梗百科同步",
     __version__,
-    "https://github.com/your-name/astrbot_plugin_meme_harvester",
+    "https://github.com/AKXS10/astrbot_plugin_meme_harvester",
 )
 class MemeHarvesterPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
@@ -149,6 +149,8 @@ class MemeHarvesterPlugin(Star):
             if self._ready:
                 await self.queue.shutdown()
                 await self.client.close()
+                await self.media.close()
+                await self.web.close()
                 await self.storage.close()
         except Exception:  # noqa: BLE001
             logger.exception("[meme_harvester] 关闭时出错")

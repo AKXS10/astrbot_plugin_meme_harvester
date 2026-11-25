@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, Awaitable, Callable
 
 from .constants import ERROR_MESSAGES, ErrorCode
@@ -92,7 +93,7 @@ class LLMService:
             raise
         except Exception as exc:
             text = str(exc)
-            if kwargs and ("response_format" in text or "json_object" in text or "400" in text):
+            if kwargs and ("response_format" in text or "json_object" in text or re.search(r"\b400\b", text)):
                 # Provider 不支持 JSON 模式：关掉它，下一轮起不再尝试
                 self._json_mode_ok = False
                 try:

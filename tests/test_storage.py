@@ -153,6 +153,49 @@ class StorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meme["sync_state"], "synced")
         self.assertEqual(meme["memewiki_slug"], "bili:BV1:1000")
 
+    async def test_update_meme_rename(self) -> None:
+        result = await self.storage.upsert_meme(
+            MemeCandidate(term="旧名字", definition="释义"), default_status="published"
+        )
+        await self.storage.mark_synced([result.meme_id], "synced", slug="bili:BV1:1")
+        updated = await self.storage.update_meme(result.meme_id, term="新名字")
+        self.assertTrue(updated)
+        meme = await self.storage.get_meme(result.meme_id)
+        self.assertEqual(meme["term"], "新名字")
+        self.assertEqual(meme["norm_term"], "新名字")
+        # 改名后重新排队同步
+        self.assertEqual(meme["sync_state"], "pending")
+        # FTS 触发器应同步更新：新名能搜到，旧名搜不到
+        self.assertEqual(len(await self.storage.list_memes(query="新名字")), 1)
+        self.assertEqual(await self.storage.list_memes(query="旧名字"), [])
+
+    async def test_update_meme_rename_conflict(self) -> None:
+        first = await self.storage.upsert_meme(
+            MemeCandidate(term="已有词条", definition="解释"), default_status="published"
+        )
+        second = await self.storage.upsert_meme(
+            MemeCandidate(term="待改名", definition="解释"), default_status="published"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            await self.storage.update_meme(second.meme_id, term="已有词条")
+        self.assertIn("词条名已存在", str(ctx.exception))
+        # 冲突时原数据不被破坏
+        meme = await self.storage.get_meme(second.meme_id)
+        self.assertEqual(meme["term"], "待改名")
+        # 改回自己（同名幂等）不报错
+        self.assertTrue(await self.storage.update_meme(second.meme_id, term="待改名"))
+        # first 仍在，id 未被吞
+        self.assertEqual(first.meme_id, first.meme_id)
+
+    async def test_update_meme_rejects_bad_status(self) -> None:
+        result = await self.storage.upsert_meme(
+            MemeCandidate(term="状态梗", definition="解释"), default_status="published"
+        )
+        with self.assertRaises(ValueError):
+            await self.storage.update_meme(result.meme_id, status="bogus")
+        meme = await self.storage.get_meme(result.meme_id)
+        self.assertEqual(meme["status"], "published")
+
     async def test_review_dedupe(self) -> None:
         first = await self.storage.add_review("conflict", {"term": "x"}, "冲突", dedupe_key="k1")
         second = await self.storage.add_review("conflict", {"term": "x"}, "冲突", dedupe_key="k1")

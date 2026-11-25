@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .models import MemeCandidate, Segment, SyncResult, TaskRecord, UpsertResult, VideoInfo
-from .text import clean_text, is_meaningful_term, normalize_term
+from .models import MemeCandidate, Segment, SyncResult, UpsertResult, VideoInfo
+from .text import clean_text, is_meaningful_term, matches_in_text, normalize_term
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS videos (
@@ -207,6 +207,18 @@ def _dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _merge_ci(existing: list[str], incoming: list[str]) -> list[str]:
+    """大小写不敏感合并别名，保留首次出现的写法。"""
+    seen = {item.lower() for item in existing if item}
+    merged = list(existing)
+    for item in incoming:
+        key = item.lower()
+        if key and key not in seen:
+            merged.append(item)
+            seen.add(key)
+    return merged
+
+
 def _decode_task(row: dict[str, Any]) -> dict[str, Any]:
     """tasks.payload 落库是 JSON 字符串，读出来还原成对象给前端用。"""
     payload = row.get("payload")
@@ -224,7 +236,7 @@ def _decode_task(row: dict[str, Any]) -> dict[str, Any]:
 class Storage:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
-        self._write_lock: asyncio.Lock | None = None
+        self._write_lock: asyncio.Lock = asyncio.Lock()
         self._fts = False
         self._opened = False
 
@@ -253,6 +265,26 @@ class Storage:
         if "url" not in columns:
             conn.execute("ALTER TABLE videos ADD COLUMN url TEXT NOT NULL DEFAULT ''")
 
+        # 归一化键统一小写：旧库里混排词名（K神/k神）可能带着原始大小写
+        # 逐行 UPDATE，撞 UNIQUE 的行单独跳过，不让整条迁移静默回滚
+        for table in ("memes", "group_slangs"):
+            rows = conn.execute(
+                f"SELECT rowid, norm_term FROM {table} WHERE norm_term <> lower(norm_term)"
+            ).fetchall()
+            for rowid, value in rows:
+                lowered = str(value).lower()
+                exists = conn.execute(
+                    f"SELECT 1 FROM {table} WHERE norm_term=? AND rowid<>?",
+                    (lowered, rowid),
+                ).fetchone()
+                if exists is None:
+                    try:
+                        conn.execute(
+                            f"UPDATE {table} SET norm_term=? WHERE rowid=?", (lowered, rowid)
+                        )
+                    except sqlite3.IntegrityError:
+                        pass
+
     def _init_sync(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
@@ -273,7 +305,6 @@ class Storage:
     async def open(self) -> "Storage":
         if not self._opened:
             await asyncio.to_thread(self._init_sync)
-            self._write_lock = asyncio.Lock()
             self._opened = True
         return self
 
@@ -284,8 +315,6 @@ class Storage:
         return await asyncio.to_thread(fn, *args, **kwargs)
 
     async def _write(self, fn, *args, **kwargs):
-        if self._write_lock is None:
-            self._write_lock = asyncio.Lock()
         async with self._write_lock:
             return await asyncio.to_thread(fn, *args, **kwargs)
 
@@ -614,7 +643,7 @@ class Storage:
             if not row["usage"] and candidate.usage:
                 updates["usage"] = clean_text(candidate.usage)
                 filled.append("usage")
-            merged_aliases = list(dict.fromkeys([*existing_aliases, *aliases]))
+            merged_aliases = _merge_ci(existing_aliases, aliases)
             if merged_aliases != existing_aliases:
                 updates["aliases"] = _dumps(merged_aliases)
                 filled.append("aliases")
@@ -764,11 +793,24 @@ class Storage:
             with self._conn() as conn:
                 rows = conn.execute(
                     "SELECT * FROM memes WHERE status='published' AND length(term) >= 2 "
-                    "AND (instr(?, term) > 0 OR instr(?, aliases) > 0) "
-                    "ORDER BY length(term) DESC, heat DESC LIMIT ?",
-                    (source, source, int(limit)),
+                    "ORDER BY length(term) DESC, heat DESC LIMIT 500"
                 ).fetchall()
-            return [dict(r) for r in rows]
+            normalized = normalize_term(source)
+            hits: list[dict[str, Any]] = []
+            for row in rows:
+                term = normalize_term(str(row["term"] or ""))
+                if term and matches_in_text(term, normalized):
+                    hits.append(dict(row))
+                else:
+                    aliases = [normalize_term(a) for a in _json_list(row["aliases"])]
+                    if any(
+                        is_meaningful_term(a) and matches_in_text(a, normalized)
+                        for a in aliases
+                    ):
+                        hits.append(dict(row))
+                if len(hits) >= int(limit):
+                    break
+            return hits
 
         return await self._read(run)
 
@@ -790,17 +832,34 @@ class Storage:
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False
+        renamed = False
         if "term" in updates:
             updates["term"] = clean_text(str(updates["term"]))
             updates["norm_term"] = normalize_term(str(updates["term"]))
+            renamed = True
         for key in ("aliases", "tags", "examples"):
             if key in updates and isinstance(updates[key], (list, tuple)):
                 updates[key] = _dumps(list(updates[key]))
+        if "status" in updates and updates["status"] not in ("draft", "published", "archived"):
+            raise ValueError("非法状态")
         updates["updated_at"] = utcnow()
+        force_pending = renamed and "sync_state" not in updates
 
         def run() -> bool:
             assignments = ", ".join(f"{key}=?" for key in updates)
             with self._conn() as conn:
+                if renamed:
+                    clash = conn.execute(
+                        "SELECT term FROM memes WHERE norm_term=? AND id<>?",
+                        (updates["norm_term"], meme_id),
+                    ).fetchone()
+                    if clash is not None:
+                        raise ValueError(f"词条名已存在：{clash['term']}")
+                    if force_pending:
+                        conn.execute(
+                            "UPDATE memes SET sync_state='pending' WHERE id=? AND sync_state<>'pending'",
+                            (meme_id,),
+                        )
                 cursor = conn.execute(
                     f"UPDATE memes SET {assignments} WHERE id=?", (*updates.values(), meme_id)
                 )
@@ -1100,13 +1159,15 @@ class Storage:
                     "SELECT * FROM group_slangs WHERE scope=? AND enabled=1 ORDER BY length(term) DESC LIMIT 200",
                     (scope,),
                 ).fetchall()
+            normalized = normalize_term(text)
             hits: list[dict[str, Any]] = []
-            lowered = text.lower()
             for row in rows:
-                term = str(row["norm_term"])
-                if term and term.lower() in lowered:
+                candidates = [str(row["norm_term"] or "")]
+                aliases = [normalize_term(a) for a in _json_list(row["aliases"])]
+                candidates += [a for a in aliases if a and is_meaningful_term(a)]
+                if any(matches_in_text(c, normalized) for c in candidates):
                     hits.append(dict(row))
-                    if len(hits) >= limit:
+                    if len(hits) >= int(limit):
                         break
             return hits
 

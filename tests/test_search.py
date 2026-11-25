@@ -56,6 +56,23 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         hits = await self.search.lookup("你这是在尊嘟假嘟")
         self.assertEqual([h["term"] for h in hits], ["尊嘟假嘟"])
 
+    async def test_lookup_matches_alias_case_insensitive(self) -> None:
+        await self.storage.upsert_meme(
+            MemeCandidate(
+                term="康神开播了",
+                definition="瓦区主播康康相关缩写梗",
+                confidence=0.95,
+                aliases=["kskbl", "KSKBL"],
+            ),
+            origin="memewiki:康神开播了",
+            default_status="published",
+            min_confidence=0.0,
+        )
+        hits = await self.search.lookup("KSKBL 是什么意思")
+        self.assertEqual([h["term"] for h in hits], ["康神开播了"])
+        hits2 = await self.search.lookup("他又刷了个kskbl")
+        self.assertEqual([h["term"] for h in hits2], ["康神开播了"])
+
     async def test_lookup_scope_isolation(self) -> None:
         hits = await self.search.lookup("本地黑话", scope="group:999")
         self.assertEqual(hits, [])

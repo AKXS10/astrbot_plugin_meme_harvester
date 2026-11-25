@@ -52,13 +52,23 @@ pip install faster-whisper "av<16"
 >
 > 插件会在导入 `faster_whisper` 前把该目录加入 `sys.path`。
 
+**为什么不把 faster-whisper 打包进插件里？**
+
+- 体积：faster-whisper + `av` + ctranslate2 + tokenizers 的 wheel 合计 **几百 MB**，且分平台（Windows / Linux / macOS × Python 版本各有独立 wheel），打进插件 zip 会让安装包和 GitHub 仓库直接爆炸。
+- 许可证：CTranslate2 是 MPL-2.0，分发二进制需要附带合规声明，混进插件仓库增加维护负担。
+- 安全与审核：插件市场 / GitHub 上传大体积二进制扩展容易被扫描器误报，也拖慢 AstrBot 装载。
+- 按需安装：faster-whisper 只在「视频无字幕且开启本地转写」时才需要；大多数 B 站视频有 CC/AI 字幕，多数用户根本用不到。
+- 模型权重另算：即便打进依赖，Whisper 模型权重（`tiny` 75MB ~ `small` 461MB）仍会在首次转写时联网下载到本机缓存，无法随插件分发省掉这一步。
+
+因此本插件把它作为**可选依赖**：上面一行 `pip install` 即可启用；不安装时 B 站字幕、网页抓取、梗百科同步全部功能不受影响，仅无字幕视频的本地转写入口提示 `ASR_UNAVAILABLE`。
+
 未安装可选依赖时，B 站与网页解析不受影响；相关任务会以 `MEDIA_UNSUPPORTED` / `ASR_UNAVAILABLE` 明确提示。
 
 ## 安装
 
 ```bash
 cd <AstrBot>/data/plugins
-git clone https://github.com/<your-name>/astrbot_plugin_meme_harvester.git
+git clone https://github.com/AKXS10/astrbot_plugin_meme_harvester.git
 # 重启 AstrBot，或在 WebUI「插件管理」中重载
 ```
 
@@ -86,7 +96,7 @@ git clone https://github.com/<your-name>/astrbot_plugin_meme_harvester.git
 ### WebUI
 
 - **单条解析 / 合集解析**：提交后进入后台队列，页面轮询任务进度；可关闭页面，任务继续执行。
-- **词条库**：搜索、编辑释义/用法/出处、切换发布状态、删除。
+- **词条库**：搜索、编辑标题/释义/用法/出处、切换发布状态、删除；修改标题会自动处理重名冲突，并联动清理梗百科里旧标题的同步条目。
 - **审核队列**：处理「释义冲突」与「低置信度」候选，采纳或忽略。
 - **群黑话**：按作用域新增/删除，聊天时优先命中。
 - **设置**：模型、抽取、限速、注入、同步等全部参数。

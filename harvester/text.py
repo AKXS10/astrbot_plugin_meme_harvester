@@ -31,8 +31,9 @@ def normalize_term(term: str) -> str:
     - 拉丁字母统一小写（中文不受影响）
     """
     value = clean_text(term).strip(_EDGE_PUNCT)
-    value = value.replace(" ", "") if _CJK_RE.search(value) else value.lower()
-    return value.strip(_EDGE_PUNCT).lower() if not _CJK_RE.search(value) else value.strip(_EDGE_PUNCT)
+    value = value.replace(" ", "") if _CJK_RE.search(value) else value
+    # 统一小写：中文无大小写，混排词名（如「K神」/「k神」）也能归一到同一个键
+    return value.strip(_EDGE_PUNCT).lower()
 
 
 def is_meaningful_term(term: str) -> bool:
@@ -110,3 +111,27 @@ def quote_in_source(quote: str, plain: str) -> bool:
     if not q:
         return False
     return q in _SPACE_RE.sub("", plain)
+
+
+_LATIN_TOKEN = re.compile(r"[a-zA-Z0-9]")
+
+
+def matches_in_text(needle: str, text: str) -> bool:
+    """单个词是否出现在文本里。
+
+    - 统一走 normalize_term：全/半角、空白、大小写差异不再丢匹配
+    - 纯拉丁词加词边界（避免「bn」命中「abnormal」）
+    - 含 CJK 的词保持子串匹配（中文没有词边界概念）
+    - 忽略大小写
+    """
+    norm = normalize_term(needle)
+    if not norm:
+        return False
+    haystack = normalize_term(text)
+    if not haystack:
+        return False
+    if not _LATIN_TOKEN.search(norm):
+        return norm in haystack
+    # 纯拉丁词：用词边界防止「bn」命中「abnormal」（前后都不是字母数字）
+    pattern = re.compile(r"(?<![a-z0-9])" + re.escape(norm) + r"(?![a-z0-9])")
+    return bool(pattern.search(haystack))
