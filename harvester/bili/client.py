@@ -54,7 +54,7 @@ class BiliClient:
         self.risk_cooldown = risk_cooldown
         self._last_request = 0.0
         self._throttle_lock = asyncio.Lock()
-        self._blocked_until = 0.0
+        self._blocked_until: dict[str, float] = {}
         self._wbi_img = ""
         self._wbi_sub = ""
         self._wbi_at = 0.0
@@ -65,11 +65,19 @@ class BiliClient:
     async def close(self) -> None:
         await self._transport.close()
 
-    def is_risk_blocked(self) -> bool:
-        return time.monotonic() < self._blocked_until
+    @staticmethod
+    def _host_key(host: str) -> str:
+        raw = str(host or "").strip().lower()
+        if "://" in raw:
+            return urlparse(raw).netloc or raw
+        return raw or BILI_MAIN_HOST
 
-    def _trip_breaker(self) -> None:
-        self._blocked_until = time.monotonic() + self.risk_cooldown
+    def is_risk_blocked(self, host: str = BILI_MAIN_HOST) -> bool:
+        """熔断按 host 分桶：api 站被 -412 不该把护照站的扫码一起锁死。"""
+        return time.monotonic() < self._blocked_until.get(self._host_key(host), 0.0)
+
+    def _trip_breaker(self, host: str = BILI_MAIN_HOST) -> None:
+        self._blocked_until[self._host_key(host)] = time.monotonic() + self.risk_cooldown
         self.stats["risk_hits"] += 1
 
     async def _throttle(self) -> None:
@@ -122,7 +130,7 @@ class BiliClient:
         allow_html: bool = False,
         host: str = BILI_MAIN_HOST,
     ) -> tuple[dict[str, Any], HttpResponse]:
-        if self.is_risk_blocked():
+        if self.is_risk_blocked(host):
             raise BiliError(ErrorCode.RISK_CONTROL)
         await self._throttle()
         query_params: dict[str, Any] = dict(params or {})
@@ -150,7 +158,7 @@ class BiliClient:
         assert response is not None
         merge_set_cookies(self.cookies, response.set_cookies)
         if response.status == 412:
-            self._trip_breaker()
+            self._trip_breaker(host)
             raise BiliError(ErrorCode.RISK_CONTROL, api_code=-412)
         if response.status in (401, 403) and "application/json" not in response.headers.get("content-type", ""):
             raise BiliError(ErrorCode.SUBTITLE_EXPIRED, api_code=response.status)
@@ -172,13 +180,13 @@ class BiliClient:
             raise BiliError(ErrorCode.INTERNAL, "B 站返回结构异常")
         code = int(payload.get("code") or 0)
         if code != 0:
-            self._raise_api_error(code, str(payload.get("message") or ""))
+            self._raise_api_error(code, str(payload.get("message") or ""), host)
         data = payload.get("data")
         return (data if isinstance(data, dict) else {}), response
 
-    def _raise_api_error(self, code: int, message: str) -> None:
+    def _raise_api_error(self, code: int, message: str, host: str = BILI_MAIN_HOST) -> None:
         if code in RISK_CODES:
-            self._trip_breaker()
+            self._trip_breaker(host)
             raise BiliError(ErrorCode.RISK_CONTROL, message, api_code=code)
         if code in LOGIN_CODES:
             raise BiliError(ErrorCode.LOGIN_EXPIRED, message, api_code=code)
@@ -355,7 +363,7 @@ class BiliClient:
         return ""
 
     async def fetch_subtitle(self, url: str) -> dict[str, Any]:
-        if self.is_risk_blocked():
+        if self.is_risk_blocked(url):
             raise BiliError(ErrorCode.RISK_CONTROL)
         url = str(url or "").strip()
         if url.startswith("//"):

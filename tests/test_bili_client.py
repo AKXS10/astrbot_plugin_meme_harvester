@@ -6,7 +6,7 @@ import unittest
 
 from harvester.bili.client import BiliClient, BiliError
 from harvester.bili.http import HttpResponse
-from harvester.constants import ErrorCode
+from harvester.constants import BILI_PASSPORT_HOST, ErrorCode
 from tests.helpers import FakeTransport, api_err, api_ok
 
 NAV = api_ok(
@@ -63,6 +63,19 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             await client.get_video_info(bvid="BV1xx411c7mD")
         self.assertEqual(second.exception.code, ErrorCode.RISK_CONTROL)
         self.assertEqual(len(transport.calls), 1)  # 第二次没有发请求
+
+    async def test_breaker_is_per_host(self) -> None:
+        """主站被 -412 熔断后，护照站（扫码登录）不应被一起锁死。"""
+
+        def handler(url, params, headers):
+            return HttpResponse(412, "<html>blocked</html>")
+
+        client, _ = make_client(handler)
+        with self.assertRaises(BiliError):
+            await client.get_video_info(bvid="BV1xx411c7mD")
+        self.assertTrue(client.is_risk_blocked())
+        self.assertFalse(client.is_risk_blocked(BILI_PASSPORT_HOST))
+        self.assertEqual(client.stats["risk_hits"], 1)
 
     async def test_login_expired_mapping(self) -> None:
         client, _ = make_client(lambda url, params, headers: api_err(-101, "账号未登录"))

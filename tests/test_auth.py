@@ -171,6 +171,18 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(data["status"], "expired")
         self.assertEqual(self.storage.status_calls[-1], (1001, "expired"))
 
+    def test_refresh_empty_nav_keeps_unknown_without_persisting(self) -> None:
+        """nav 返回空 dict（风控页被折成 {}）不能当成「已退出」写库。"""
+        run(self.auth.save_cookie_text("SESSDATA=abc; bili_jct=j"))
+        self.client.nav = {}
+        data = run(self.auth.refresh())
+        self.assertEqual(data["status"], "unknown")
+        self.assertFalse(data["logged_in"])
+        self.assertEqual(self.storage.status_calls, [])
+        self.assertEqual(self.storage.accounts[1001]["status"], "ok")
+        # 账号仍在，重启后 latest_account() 还能拿到 -> 不用重新扫码
+        self.assertIsNotNone(run(self.storage.latest_account()))
+
     def test_logout_clears(self) -> None:
         run(self.auth.save_cookie_text("SESSDATA=abc; bili_jct=j"))
         run(self.auth.logout())

@@ -88,10 +88,19 @@ class SourceLabelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["url"], info.url)
 
 
+class _StubLogger:
+    """TempStore 的日志器由 main.py 注入，测试里给个不发散的空壳。"""
+
+    def debug(self, *args: object, **kwargs: object) -> None: ...
+    def info(self, *args: object, **kwargs: object) -> None: ...
+    def warning(self, *args: object, **kwargs: object) -> None: ...
+    def error(self, *args: object, **kwargs: object) -> None: ...
+
+
 class TempStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.store = TempStore(Path(self._tmp.name) / "temp")
+        self.store = TempStore(Path(self._tmp.name) / "temp", logger=_StubLogger())
 
     def tearDown(self) -> None:
         self._tmp.cleanup()

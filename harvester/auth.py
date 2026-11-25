@@ -73,8 +73,16 @@ class AuthManager:
     def _ensure_fernet(self) -> Any:
         if self._fernet_ready:
             return self._fernet
-        self._fernet_ready = True
         if Fernet is None:
+            # 缺少 cryptography 时只能存 base64（等价明文），必须明确告诉用户，
+            # 而不是静默降级。
+            if self.logger:
+                self.logger.warning(
+                    "缺少 cryptography，B 站 cookie 将以 base64 明文保存；"
+                    "安装 requirements.txt 后重新登录即可恢复加密存储"
+                )
+            self._fernet = None
+            self._fernet_ready = True
             return None
         try:
             if not self.key_path.exists():
@@ -87,9 +95,12 @@ class AuthManager:
                     pass
             self._fernet = Fernet(self.key_path.read_bytes().strip())
         except Exception as exc:  # pragma: no cover - 磁盘/权限异常
+            # 不置 _fernet_ready：下次调用重试，避免一次瞬时磁盘错误永久降级成明文。
             if self.logger:
                 self.logger.warning("无法初始化 cookie 加密密钥：%s", exc)
             self._fernet = None
+            return None
+        self._fernet_ready = True
         return self._fernet
 
     def encrypt_cookies(self, cookies: dict[str, str]) -> str:
@@ -190,6 +201,16 @@ class AuthManager:
                     await self.storage.update_account_status(int(self.account.get("mid") or 0), "expired")
             else:
                 self.state = "unknown"
+                if self.logger:
+                    self.logger.warning("nav 校验失败（%s），登录态暂时未知：%s", exc.code.value, exc)
+            return await self.status()
+        if not nav:
+            # 空响应（风控 HTML 页被折成 {}、网关占位响应等）无法判定登录态：
+            # 保持 unknown 且绝不落库，否则 latest_account() 只认 ok，
+            # 重启后会表现为「账号消失，必须重新扫码」。
+            self.state = "unknown"
+            if self.logger:
+                self.logger.warning("nav 返回空响应，无法判定登录态，保持 unknown 且不改动已保存账号")
             return await self.status()
         if not nav.get("isLogin"):
             self.state = "expired"

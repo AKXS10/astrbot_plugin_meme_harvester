@@ -135,6 +135,8 @@ class MemeHarvesterPlugin(Star):
         interval = float(merged.request_interval)
         self.client.interval = interval
         self.client.risk_cooldown = float(merged.risk_cooldown)
+        # user_agent 是暴露给用户的配置项：漏同步会让设置页改了不生效。
+        self.client.user_agent = merged.user_agent or self.client.user_agent
         return merged
 
     async def terminate(self) -> None:
