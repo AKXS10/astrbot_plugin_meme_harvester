@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from astrbot.api.web import file_response, json_response, request
 
+from .auth import AuthError
 from .config import _as_bool
 from .bili.client import BiliError
 from .bili.urls import parse_target
