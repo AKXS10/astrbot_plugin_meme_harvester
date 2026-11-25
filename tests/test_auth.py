@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harvester.auth import AuthManager, AuthError
+from harvester.auth import AuthManager, AuthError, Fernet
 from harvester.constants import ErrorCode
 
 
@@ -92,9 +92,15 @@ class AuthTests(unittest.TestCase):
     def test_encrypt_roundtrip_and_key_file(self) -> None:
         cookies = {"SESSDATA": "abc123", "bili_jct": "xyz"}
         token = self.auth.encrypt_cookies(cookies)
-        self.assertTrue(token.startswith(("fernet:", "b64:")))
+        if Fernet is None:
+            # 没装 cryptography 时降级为 b64（等价明文），不会生成密钥文件。
+            # 断言必须跟着环境走，否则没有 cryptography 的 CI 会假红。
+            self.assertTrue(token.startswith("b64:"))
+            self.assertFalse(self.auth.key_path.exists())
+        else:
+            self.assertTrue(token.startswith("fernet:"))
+            self.assertTrue(self.auth.key_path.exists())
         self.assertEqual(self.auth.decrypt_cookies(token), cookies)
-        self.assertTrue(self.auth.key_path.exists())
 
     def test_decrypt_garbage_returns_empty(self) -> None:
         self.assertEqual(self.auth.decrypt_cookies("fernet:not-a-token"), {})
